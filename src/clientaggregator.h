@@ -173,7 +173,7 @@ private:
     CJamStatusServer*        m_httpServer{};
     QThread*                 m_httpServerThread{};
 
-    mutable QMutex m_cacheMutex;
+    mutable QRecursiveMutex m_cacheMutex;
     mutable QByteArray m_jsonCache;
     mutable QDateTime m_cacheTimestamp;
     mutable QByteArray m_etag;

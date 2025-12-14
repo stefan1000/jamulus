@@ -225,8 +225,21 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
 
     for ( const auto& serverInfo : vecServerInfo )
     {
-        CHostAddress serverAddr = ( serverInfo.HostAddr.InetAddr.isNull() ) ? inetAddr : serverInfo.HostAddr;
-        QString      serverIp   = serverAddr.InetAddr.toString();
+        CHostAddress serverAddr;
+        if ( serverInfo.HostAddr.InetAddr.toIPv4Address() == 0 && serverInfo.HostAddr.iPort == 0 )
+        {
+            serverAddr = inetAddr;
+        }
+        else
+        {
+            serverAddr = serverInfo.HostAddr;
+        }
+                QString serverIp;
+                if (serverAddr.InetAddr.protocol() == QAbstractSocket::IPv6Protocol && serverAddr.InetAddr.toIPv4Address() != 0) {
+                    serverIp = QHostAddress(serverAddr.InetAddr.toIPv4Address()).toString();
+                } else {
+                    serverIp = serverAddr.InetAddr.toString();
+                }
         quint16      serverPort = serverAddr.iPort;
         QString      serverId   = serverIp + ":" + QString::number ( serverPort );
         receivedServers.insert ( serverId );
@@ -237,6 +250,8 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
             Server newServer;
             newServer.ip           = serverIp;
             newServer.port         = serverPort;
+            newServer.numip        = serverAddr.InetAddr.toIPv4Address();
+            newServer.ipaddrs      = serverInfo.LHostAddr.toString(); // Add this line
             newServer.name         = serverInfo.strName;
             newServer.city         = serverInfo.strCity;
             newServer.country      = QLocale::countryToString ( serverInfo.eCountry );
@@ -364,7 +379,19 @@ void CClientAggregator::updateOrAddServer ( const QString& directoryAddress, con
             // Preserve client list and ping response time
             QList<Client> clients  = it->clients;
             QDateTime     lastPing = it->lastPingResponse;
-            *it                    = server;
+
+            // Update specific fields that come from the directory server list
+            it->ip           = server.ip;
+            it->port         = server.port;
+            it->numip        = server.numip;
+            it->name         = server.name;
+            it->city         = server.city;
+            it->country      = server.country;
+            it->countryid    = server.countryid;
+            it->maxclients   = server.maxclients;
+            it->perm         = server.perm;
+
+            // Restore preserved fields
             it->clients            = clients;
             it->lastPingResponse   = lastPing;
         }
@@ -456,6 +483,7 @@ Client* CClientAggregator::getClient ( const QString& directoryAddress, const QS
 
 QByteArray CClientAggregator::getJson() const
 {
+    QMutexLocker locker ( &m_cacheMutex );
     QJsonArray serverList;
     int        index = 0;
     for ( const auto& directory : m_directories )
@@ -490,9 +518,10 @@ QByteArray CClientAggregator::getCompressedJson ( QByteArray& etag )
 
     if ( mostRecentChange > m_cacheTimestamp )
     {
-        m_jsonCache      = qCompress ( getJson(), 9 ).mid(4);
+        QByteArray raw = getJson();
+        m_jsonCache      = qCompress ( raw, 9 );
         m_cacheTimestamp = mostRecentChange;
-        m_etag           = QCryptographicHash::hash ( m_jsonCache, QCryptographicHash::Sha1 ).toHex();
+        m_etag           = QCryptographicHash::hash ( raw, QCryptographicHash::Sha1 ).toHex();
     }
 
     etag = m_etag;
@@ -598,11 +627,18 @@ void CJamStatusServer::onReadyRead()
     }
 
     QByteArray ifNoneMatch;
+    bool acceptDeflate = false;
     for ( const QByteArray& line : requestLines )
     {
-        if ( line.toLower().startsWith ( "if-none-match:" ) )
+        QByteArray lower = line.toLower();
+        if ( lower.startsWith ( "if-none-match:" ) )
         {
             ifNoneMatch = line.mid ( 14 ).trimmed();
+        }
+        else if ( lower.startsWith ( "accept-encoding:" ) )
+        {
+            if ( lower.contains ( "deflate" ) )
+                acceptDeflate = true;
         }
     }
 
@@ -618,19 +654,50 @@ void CJamStatusServer::onReadyRead()
         return;
     }
 
-    QByteArray response;
-    response.append ( "HTTP/1.1 200 OK\r\n" );
-    response.append ( "Content-Type: application/json\r\n" );
-    response.append ( "Content-Encoding: deflate\r\n" );
-    response.append ( "ETag: " + etag + "\r\n" );
-    response.append ( "Content-Length: " + QByteArray::number ( compressedJson.size() ) + "\r\n" );
-    response.append ( "\r\n" );
+    QByteArray responseHeader;
+    QByteArray body;
+
+    if ( acceptDeflate )
+    {
+        // Client accepts deflate: qCompress output is zlib with 4-byte header; remove first 4 bytes to produce raw deflate
+        QByteArray deflateData = compressedJson;
+        if ( deflateData.size() > 6 ) // Ensure there's enough data to strip header (2 bytes) and trailer (4 bytes)
+        {
+            // Strip 2-byte zlib header and 4-byte zlib checksum to get raw deflate
+            deflateData = deflateData.mid(2, deflateData.size() - 6);
+        }
+        else // Handle cases where data is too small to be valid zlib/deflate
+        {
+            deflateData.clear(); // Send empty or error if data is malformed
+        }
+
+        responseHeader.append ( "HTTP/1.1 200 OK\r\n" );
+        responseHeader.append ( "Content-Type: application/json\r\n" );
+        responseHeader.append ( "Content-Encoding: deflate\r\n" );
+        responseHeader.append ( "ETag: " + etag + "\r\n" );
+        responseHeader.append ( "Content-Length: " + QByteArray::number ( deflateData.size() ) + "\r\n" );
+        responseHeader.append ( "\r\n" );
+
+        body = deflateData;
+    }
+    else
+    {
+        // Send uncompressed JSON (client likely doesn't accept compression)
+        QByteArray raw = m_aggregator->getJson();
+        responseHeader.append ( "HTTP/1.1 200 OK\r\n" );
+        responseHeader.append ( "Content-Type: application/json\r\n" );
+        responseHeader.append ( "ETag: " + etag + "\r\n" );
+        responseHeader.append ( "Content-Length: " + QByteArray::number ( raw.size() ) + "\r\n" );
+        responseHeader.append ( "\r\n" );
+
+        body = raw;
+    }
 
     if ( method == "GET" )
     {
-        response.append ( compressedJson );
+        socket->write ( responseHeader );
+        socket->write ( body );
     }
 
-    socket->write ( response );
     socket->close();
 }

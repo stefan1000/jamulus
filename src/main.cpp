@@ -944,7 +944,7 @@ int main ( int argc, char** argv )
                 qCritical() << "Aggregator mode requires an http port via --httpport";
                 exit(1);
             }
-            QStringList directoryAddresses = {  "anygenre1.jamulus.io:22124"} ;
+            QStringList directoryAddresses = {  "jazz.jamulus.io:22324"} ;
             CClientAggregator aggregator(directoryAddresses, pApp);
             aggregator.start();
             aggregator.startHttpServer(iHttpPort);
