@@ -54,6 +54,7 @@ extern void qt_set_sequence_auto_mnemonic ( bool bEnable );
 #        include "clientrpc.h"
 #    endif
 #endif
+#include "clientaggregator.h"
 
 // Implementation **************************************************************
 
@@ -81,6 +82,8 @@ int main ( int argc, char** argv )
 #else
     bool bIsClient = true;
 #endif
+    bool         bRunAggregator              = false;
+    quint16      iHttpPort                   = 0;
     bool         bUseGUI                     = true;
     bool         bStartMinimized             = false;
     bool         bShowComplRegConnList       = false;
@@ -160,6 +163,23 @@ int main ( int argc, char** argv )
         {
             std::cout << qUtf8Printable ( GetVersionAndNameStr ( false ) );
             exit ( 0 );
+        }
+
+        // Aggregator mode -----------------------------------------------------
+        if ( GetFlagArgument( argv, i, "--aggregator", "--aggregator" ) )
+        {
+            bRunAggregator = true;
+            qInfo() << "- aggregator mode chosen";
+            CommandLineOptions << "--aggregator";
+            continue;
+        }
+
+        if ( GetNumericArgument( argc, argv, i, "--httpport", "--httpport", 0, 65535, rDbleArgument ) )
+        {
+            iHttpPort = static_cast<quint16>( rDbleArgument );
+            qInfo() << qUtf8Printable( QString( "- selected http port number: %1" ).arg( iHttpPort ) );
+            CommandLineOptions << "--httpport";
+            continue;
         }
 
         // Common options:
@@ -917,137 +937,153 @@ int main ( int argc, char** argv )
 
     try
     {
-#ifndef SERVER_ONLY
-        if ( bIsClient )
+        if (bRunAggregator)
         {
-            // Client:
-            // actual client object
-            CClient Client ( iPortNumber,
-                             iQosNumber,
-                             strConnOnStartupAddress,
-                             strMIDISetup,
-                             bNoAutoJackConnect,
-                             strClientName,
-                             bEnableIPv6,
-                             bMuteMeInPersonalMix );
+            
+            if (iHttpPort == 0) {
+                qCritical() << "Aggregator mode requires an http port via --httpport";
+                exit(1);
+            }
+            QStringList directoryAddresses = {  "anygenre1.jamulus.io:22124"} ;
+            CClientAggregator aggregator(directoryAddresses, pApp);
+            aggregator.start();
+            aggregator.startHttpServer(iHttpPort);
+            pApp->exec();
+        }
+        else
+        {
+#ifndef SERVER_ONLY
+            if ( bIsClient )
+            {
+                // Client:
+                // actual client object
+                CClient Client ( iPortNumber,
+                                 iQosNumber,
+                                 strConnOnStartupAddress,
+                                 strMIDISetup,
+                                 bNoAutoJackConnect,
+                                 strClientName,
+                                 bEnableIPv6,
+                                 bMuteMeInPersonalMix );
 
-            // load settings from init-file (command line options override)
-            CClientSettings Settings ( &Client, strIniFileName );
-            Settings.Load ( CommandLineOptions );
+                // load settings from init-file (command line options override)
+                CClientSettings Settings ( &Client, strIniFileName );
+                Settings.Load ( CommandLineOptions );
 
 #    ifndef NO_JSON_RPC
-            if ( pRpcServer )
-            {
-                new CClientRpc ( &Client, pRpcServer, pRpcServer );
-            }
+                if ( pRpcServer )
+                {
+                    new CClientRpc ( &Client, pRpcServer, pRpcServer );
+                }
 #    endif
 
 #    ifndef HEADLESS
-            if ( bUseGUI )
-            {
-                // load translation
-                if ( bUseTranslation )
+                if ( bUseGUI )
                 {
-                    CLocale::LoadTranslation ( Settings.strLanguage, pApp );
-                    CInstPictures::UpdateTableOnLanguageChange();
+                    // load translation
+                    if ( bUseTranslation )
+                    {
+                        CLocale::LoadTranslation ( Settings.strLanguage, pApp );
+                        CInstPictures::UpdateTableOnLanguageChange();
+                    }
+
+                    // GUI object
+                    CClientDlg ClientDlg ( &Client,
+                                           &Settings,
+                                           strConnOnStartupAddress,
+                                           strMIDISetup,
+                                           bShowComplRegConnList,
+                                           bShowAnalyzerConsole,
+                                           bMuteStream,
+                                           bEnableIPv6,
+                                           nullptr );
+
+                    // show dialog
+                    ClientDlg.show();
+
+                    pApp->exec();
                 }
+                else
+#    endif
+                {
+                    // only start application without using the GUI
+                    qInfo() << qUtf8Printable ( GetVersionAndNameStr ( false ) );
 
-                // GUI object
-                CClientDlg ClientDlg ( &Client,
-                                       &Settings,
-                                       strConnOnStartupAddress,
-                                       strMIDISetup,
-                                       bShowComplRegConnList,
-                                       bShowAnalyzerConsole,
-                                       bMuteStream,
-                                       bEnableIPv6,
-                                       nullptr );
-
-                // show dialog
-                ClientDlg.show();
-
-                pApp->exec();
+                    pApp->exec();
+                }
             }
             else
-#    endif
-            {
-                // only start application without using the GUI
-                qInfo() << qUtf8Printable ( GetVersionAndNameStr ( false ) );
-
-                pApp->exec();
-            }
-        }
-        else
 #endif
-        {
-            // Server:
-            // actual server object
-            CServer Server ( iNumServerChannels,
-                             strLoggingFileName,
-                             strServerBindIP,
-                             iPortNumber,
-                             iQosNumber,
-                             strHTMLStatusFileName,
-                             strDirectoryAddress,
-                             strServerListFileName,
-                             strServerInfo,
-                             strServerPublicIP,
-                             strServerListFilter,
-                             strWelcomeMessage,
-                             strRecordingDirName,
-                             bDisconnectAllClientsOnQuit,
-                             bUseDoubleSystemFrameSize,
-                             bUseMultithreading,
-                             bDisableRecording,
-                             bDelayPan,
-                             bEnableIPv6,
-                             eLicenceType );
+            {
+                // Server:
+                // actual server object
+                CServer Server ( iNumServerChannels,
+                                 strLoggingFileName,
+                                 strServerBindIP,
+                                 iPortNumber,
+                                 iQosNumber,
+                                 strHTMLStatusFileName,
+                                 strDirectoryAddress,
+                                 strServerListFileName,
+                                 strServerInfo,
+                                 strServerPublicIP,
+                                 strServerListFilter,
+                                 strWelcomeMessage,
+                                 strRecordingDirName,
+                                 bDisconnectAllClientsOnQuit,
+                                 bUseDoubleSystemFrameSize,
+                                 bUseMultithreading,
+                                 bDisableRecording,
+                                 bDelayPan,
+                                 bEnableIPv6,
+                                 eLicenceType );
 
 #ifndef NO_JSON_RPC
-            if ( pRpcServer )
-            {
-                new CServerRpc ( &Server, pRpcServer, pRpcServer );
-            }
+                if ( pRpcServer )
+                {
+                    new CServerRpc ( &Server, pRpcServer, pRpcServer );
+                }
 
 #endif
 #ifndef HEADLESS
-            if ( bUseGUI )
-            {
-                // load settings from init-file (command line options override)
-                CServerSettings Settings ( &Server, strIniFileName );
-                Settings.Load ( CommandLineOptions );
-
-                // load translation
-                if ( bUseTranslation )
+                if ( bUseGUI )
                 {
-                    CLocale::LoadTranslation ( Settings.strLanguage, pApp );
+                    // load settings from init-file (command line options override)
+                    CServerSettings Settings ( &Server, strIniFileName );
+                    Settings.Load ( CommandLineOptions );
+
+                    // load translation
+                    if ( bUseTranslation )
+                    {
+                        CLocale::LoadTranslation ( Settings.strLanguage, pApp );
+                    }
+
+                    // GUI object for the server
+                    CServerDlg ServerDlg ( &Server, &Settings, bStartMinimized, nullptr );
+
+                    // show dialog (if not the minimized flag is set)
+                    if ( !bStartMinimized )
+                    {
+                        ServerDlg.show();
+                    }
+
+                    pApp->exec();
                 }
-
-                // GUI object for the server
-                CServerDlg ServerDlg ( &Server, &Settings, bStartMinimized, nullptr );
-
-                // show dialog (if not the minimized flag is set)
-                if ( !bStartMinimized )
-                {
-                    ServerDlg.show();
-                }
-
-                pApp->exec();
-            }
-            else
+                else
 #endif
-            {
-                // only start application without using the GUI
-                qInfo() << qUtf8Printable ( GetVersionAndNameStr ( false ) );
-
-                // CServerListManager defaults to AT_NONE, so need to switch if
-                // strDirectoryAddress is wanted
-                if ( !strDirectoryAddress.isEmpty() )
                 {
-                    Server.SetDirectoryType ( AT_CUSTOM );
-                }
+                    // only start application without using the GUI
+                    qInfo() << qUtf8Printable ( GetVersionAndNameStr ( false ) );
 
-                pApp->exec();
+                    // CServerListManager defaults to AT_NONE, so need to switch if
+                    // strDirectoryAddress is wanted
+                    if ( !strDirectoryAddress.isEmpty() )
+                    {
+                        Server.SetDirectoryType ( AT_CUSTOM );
+                    }
+
+                    pApp->exec();
+                }
             }
         }
     }
