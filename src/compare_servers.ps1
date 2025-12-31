@@ -1,8 +1,11 @@
 # PowerShell script to compare Jamulus server lists
+param (
+    [string]$pivotserver = "Blues|Blues/Rock"
+)
 
 # Define URLs for the server lists
 $jamstatusUrl = "http://localhost:3000/jamstatus"
-$explorerUrl = "https://explorer.jamulus.io/servers.php?directory=jazz.jamulus.io:22324"
+$explorerUrl = "https://explorer.jamulus.io/servers.php?directory=anygenre1.jamulus.io:22124"
 
 function Get-ServerList {
     param (
@@ -88,6 +91,58 @@ foreach ($job in @($jamstatusJob, $explorerJob)) {
 # Clean up jobs
 Remove-Job -Job $jamstatusJob, $explorerJob -Force | Out-Null
 
+if (-not [string]::IsNullOrWhitespace($pivotserver)) {
+    $foundServers = $jamstatusServers | Where-Object { $_.name -match $pivotserver }
+    if ($foundServers) {
+        Write-Host "`n--- Pivot Server Details ---"
+        foreach ($server in $foundServers) {
+            Write-Host "`n-- Comparing server: $($server.name) --"
+            $explorerServer = $explorerServers | Where-Object { $_.ip -eq $server.ip -and $_.port -eq $server.port }
+
+            if ($explorerServer) {
+                # Column widths
+                $keyColWidth = 20
+                $valColWidth = 50
+
+                # Headers
+                $header = ("{0,-$keyColWidth}{1,-$valColWidth}{2,-$valColWidth}" -f "Field", "Local Jamstatus", "Explorer")
+                Write-Host $header
+                Write-Host ("-" * ($keyColWidth + ($valColWidth * 2)))
+
+                $properties = $server.psobject.Properties.Name
+
+                foreach ($propName in $properties) {
+                    $localValue = $server.$propName
+                    $explorerValue = $explorerServer.$propName
+                    
+                    # Convert values to comparable strings
+                    $localValueStr = if ($null -eq $localValue) { "(null)" } elseif ($localValue -is [System.Collections.IEnumerable] -and -not ($localValue -is [string])) { $localValue | ConvertTo-Json -Compress } else { $localValue.ToString() }
+                    $explorerValueStr = if ($null -eq $explorerValue) { "(null)" } elseif ($explorerValue -is [System.Collections.IEnumerable] -and -not ($explorerValue -is [string])) { $explorerValue | ConvertTo-Json -Compress } else { $explorerValue.ToString() }
+
+                    # Truncate long strings for display
+                    $localDisplayStr = if ($localValueStr.Length -gt $valColWidth - 2) { $localValueStr.Substring(0, $valColWidth - 5) + "..." } else { $localValueStr }
+                    $explorerDisplayStr = if ($explorerValueStr.Length -gt $valColWidth - 2) { $explorerValueStr.Substring(0, $valColWidth - 5) + "..." } else { $explorerValueStr }
+
+                    $line = ("{0,-$keyColWidth}{1,-$valColWidth}{2,-$valColWidth}" -f $propName, $localDisplayStr, $explorerDisplayStr)
+
+                    if ($localValueStr -ne $explorerValueStr) {
+                        Write-Host $line -ForegroundColor Yellow
+                    } else {
+                        Write-Host $line
+                    }
+                }
+            } else {
+                Write-Warning "Server '$($server.name)' not found in Explorer list."
+                Write-Host "`n- Local Jamstatus Details:"
+                Write-Host ($server | ConvertTo-Json -Depth 5)
+            }
+        }
+    }
+    else {
+        Write-Warning "Pivot server matching '$pivotserver' not found in Local Jamstatus list."
+    }
+}
+
 Write-Host "`n--- Consistency Check Results ---"
 
 # Perform consistency checks
@@ -116,8 +171,8 @@ else {
     $jamstatusIps = $jamstatusServers | Select-Object -ExpandProperty ip -Unique | Sort-Object
     $explorerIps = $explorerServers | Select-Object -ExpandProperty ip -Unique | Sort-Object
 
-    Write-Host "`nLocal Jamstatus Unique IPs: $($jamstatusIps -join ', ')"
-    Write-Host "Explorer Unique IPs: $($explorerIps -join ', ')"
+    # Write-Host "`nLocal Jamstatus Unique IPs: $($jamstatusIps -join ', ')"
+    # Write-Host "Explorer Unique IPs: $($explorerIps -join ', ')"
 
     # Use Compare-Object to find differences
     $ipDifferences = Compare-Object $jamstatusIps $explorerIps -IncludeEqual

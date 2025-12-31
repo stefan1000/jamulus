@@ -55,6 +55,7 @@ struct Client
     int       instrumentid{};
     int       skillid{};
     QString   country;
+    QString   country_code;
     QString   instrument;
     QString   skill;
     QString   name;
@@ -72,6 +73,7 @@ struct Server
     int           maxclients{};
     int           perm{};
     QString       country;
+    QString       country_code;
     QString       name;
     QString       ipaddrs;
     QString       city;

@@ -21,6 +21,24 @@ namespace
             return QStringLiteral ( "Not Set" );
         }
     }
+
+    QString countryToCode(QLocale::Country country)
+    {
+        if (country == QLocale::AnyCountry)
+        {
+            return QString();
+        }
+        const QList<QLocale> locales = QLocale::matchingLocales(QLocale::AnyLanguage, QLocale::AnyScript, country);
+        if (!locales.isEmpty())
+        {
+            const QStringList parts = locales.first().name().split('_');
+            if (parts.size() > 1)
+            {
+                return parts.last();
+            }
+        }
+        return QString();
+    }
 }
 
 QJsonObject Client::toJson() const
@@ -31,6 +49,7 @@ QJsonObject Client::toJson() const
     obj["instrumentid"] = instrumentid;
     obj["skillid"]      = skillid;
     obj["country"]      = country;
+    obj["country_code"] = country_code;
     obj["instrument"]   = instrument;
     obj["skill"]        = skill;
     obj["name"]         = name;
@@ -47,6 +66,7 @@ QJsonObject Server::toJson() const
     obj["maxclients"]  = maxclients;
     obj["perm"]        = perm;
     obj["country"]     = country;
+    obj["country_code"] = country_code;
     obj["name"]        = name;
     obj["ipaddrs"]     = ipaddrs;
     obj["city"]        = city;
@@ -255,6 +275,7 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
             newServer.name         = serverInfo.strName;
             newServer.city         = serverInfo.strCity;
             newServer.country      = QLocale::countryToString ( serverInfo.eCountry );
+            newServer.country_code = countryToCode(serverInfo.eCountry);
             newServer.countryid    = static_cast<int> ( serverInfo.eCountry );
             newServer.maxclients   = serverInfo.iMaxNumClients;
             newServer.perm         = serverInfo.bPermanentOnline;
@@ -268,6 +289,7 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
             existingServer->name         = serverInfo.strName;
             existingServer->city         = serverInfo.strCity;
             existingServer->country      = QLocale::countryToString ( serverInfo.eCountry );
+            existingServer->country_code = countryToCode(serverInfo.eCountry);
             existingServer->countryid    = static_cast<int> ( serverInfo.eCountry );
             existingServer->maxclients   = serverInfo.iMaxNumClients;
             existingServer->perm         = serverInfo.bPermanentOnline;
@@ -333,6 +355,7 @@ void CClientAggregator::onConnClientsListMesReceived ( const CHostAddress& inetA
                 Client newClient;
                 newClient.chanid       = chanInfo.iChanID;
                 newClient.country      = QLocale::countryToString ( chanInfo.eCountry );
+                newClient.country_code = countryToCode(chanInfo.eCountry);
                 newClient.instrument   = CInstPictures::GetName ( chanInfo.iInstrument );
                 newClient.skill        = skillLevelToString ( chanInfo.eSkillLevel );
                 newClient.skillid      = static_cast<int> ( chanInfo.eSkillLevel );
@@ -387,6 +410,7 @@ void CClientAggregator::updateOrAddServer ( const QString& directoryAddress, con
             it->name         = server.name;
             it->city         = server.city;
             it->country      = server.country;
+            it->country_code = server.country_code;
             it->countryid    = server.countryid;
             it->maxclients   = server.maxclients;
             it->perm         = server.perm;
@@ -672,7 +696,7 @@ void CJamStatusServer::onReadyRead()
         }
 
         responseHeader.append ( "HTTP/1.1 200 OK\r\n" );
-        responseHeader.append ( "Content-Type: application/json\r\n" );
+        responseHeader.append ( "Content-Type: application/json\r_n" );
         responseHeader.append ( "Content-Encoding: deflate\r\n" );
         responseHeader.append ( "ETag: " + etag + "\r\n" );
         responseHeader.append ( "Content-Length: " + QByteArray::number ( deflateData.size() ) + "\r\n" );
