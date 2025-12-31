@@ -62,7 +62,7 @@ struct Client
     QString   city;
     QDateTime lastModified;
 
-    QJsonObject toJson() const;
+    QJsonObject toJson(bool detailed) const;
 };
 
 struct Server
@@ -86,7 +86,7 @@ struct Server
     QDateTime     lastModified;
     QDateTime     lastPingResponse;
 
-    QJsonObject toJson() const;
+    QJsonObject toJson(bool detailed) const;
 };
 
 struct Directory
@@ -128,7 +128,7 @@ class CClientAggregator : public QObject
     Q_OBJECT
 
 public:
-    explicit CClientAggregator ( const QStringList& directoryAddresses, QObject* parent = nullptr );
+    explicit CClientAggregator ( const QStringList& directoryAddresses, bool detailedJson = false, QObject* parent = nullptr );
     ~CClientAggregator();
 
     // CRUD for Directories
@@ -174,6 +174,7 @@ private:
     QTimer                   m_updateTimer;
     CJamStatusServer*        m_httpServer{};
     QThread*                 m_httpServerThread{};
+    bool                     m_detailedJson;
 
     mutable QRecursiveMutex m_cacheMutex;
     mutable QByteArray m_jsonCache;

@@ -41,14 +41,16 @@ namespace
     }
 }
 
-QJsonObject Client::toJson() const
+QJsonObject Client::toJson(bool detailed) const
 {
     QJsonObject obj;
     obj["chanid"]       = chanid;
-    obj["countryid"]    = countryid;
+    obj["country"]      = country;
+    if (detailed) {
+        obj["countryid"]    = countryid;
+    }
     obj["instrumentid"] = instrumentid;
     obj["skillid"]      = skillid;
-    obj["country"]      = country;
     obj["country_code"] = country_code;
     obj["instrument"]   = instrument;
     obj["skill"]        = skill;
@@ -57,30 +59,33 @@ QJsonObject Client::toJson() const
     return obj;
 }
 
-QJsonObject Server::toJson() const
+QJsonObject Server::toJson(bool detailed) const
 {
     QJsonObject obj;
-    obj["numip"]       = static_cast<qint64> ( numip );
     obj["port"]        = static_cast<qint64> ( port );
-    obj["countryid"]   = countryid;
     obj["maxclients"]  = maxclients;
-    obj["perm"]        = perm;
-    obj["country"]     = country;
-    obj["country_code"] = country_code;
     obj["name"]        = name;
-    obj["ipaddrs"]     = ipaddrs;
+    obj["country_code"] = country_code;
+    obj["country"]     = country;
     obj["city"]        = city;
     obj["ip"]          = ip;
-    obj["ping"]        = ping;
-    obj["os"]          = os;
-    obj["version"]     = version;
-    obj["versionsort"] = versionsort;
     obj["nclients"]    = clients.count();
+
+    if (detailed) {
+        obj["numip"]       = static_cast<qint64> ( numip );
+        obj["countryid"]   = countryid;
+        obj["perm"]        = perm;
+        obj["ipaddrs"]     = ipaddrs;
+        obj["ping"]        = ping;
+        obj["os"]          = os;
+        obj["version"]     = version;
+        obj["versionsort"] = versionsort;
+    }
 
     QJsonArray clientsArray;
     for ( const auto& client : clients )
     {
-        clientsArray.append ( client.toJson() );
+        clientsArray.append ( client.toJson(detailed) );
     }
     if ( !clientsArray.isEmpty() )
     {
@@ -90,8 +95,8 @@ QJsonObject Server::toJson() const
     return obj;
 }
 
-CClientAggregator::CClientAggregator ( const QStringList& directoryAddresses, QObject* parent )
-    : QObject ( parent ), m_protocol(), m_pSocket( new CConnectionlessSocket( this ) ), m_httpServer ( nullptr ), m_httpServerThread ( nullptr )
+CClientAggregator::CClientAggregator ( const QStringList& directoryAddresses, bool detailedJson, QObject* parent )
+    : QObject ( parent ), m_protocol(), m_pSocket( new CConnectionlessSocket( this ) ), m_httpServer ( nullptr ), m_httpServerThread ( nullptr ), m_detailedJson(detailedJson)
 {
     for ( const auto& address : directoryAddresses )
     {
@@ -296,6 +301,15 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
             existingServer->lastModified = now;
         }
     }
+
+    dir->servers.erase(
+        std::remove_if(dir->servers.begin(), dir->servers.end(),
+            [&](const Server& server) {
+                QString serverId = server.ip + ":" + QString::number(server.port);
+                return !receivedServers.contains(serverId);
+            }),
+        dir->servers.end());
+    dir->lastModified = now;
 }
 
 void CClientAggregator::onPingTimeReceived ( const CHostAddress& inetAddr, int iPingTime, int iNumClients )
@@ -514,7 +528,7 @@ QByteArray CClientAggregator::getJson() const
     {
         for ( const auto& server : directory.servers )
         {
-            QJsonObject serverObj = server.toJson();
+            QJsonObject serverObj = server.toJson(false);
             serverObj["index"]    = index++;
             serverList.append ( serverObj );
         }
@@ -696,7 +710,7 @@ void CJamStatusServer::onReadyRead()
         }
 
         responseHeader.append ( "HTTP/1.1 200 OK\r\n" );
-        responseHeader.append ( "Content-Type: application/json\r_n" );
+        responseHeader.append ( "Content-Type: application/json\r\n" );
         responseHeader.append ( "Content-Encoding: deflate\r\n" );
         responseHeader.append ( "ETag: " + etag + "\r\n" );
         responseHeader.append ( "Content-Length: " + QByteArray::number ( deflateData.size() ) + "\r\n" );

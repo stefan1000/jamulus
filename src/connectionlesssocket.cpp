@@ -74,7 +74,7 @@ void CConnectionlessSocket::onReadyRead()
             continue;
         }
 
-        qDebug() << "CConnectionlessSocket: Received" << bytesRead << "bytes from" << sender.toString() << ":" << senderPort;
+        //qDebug() << "CConnectionlessSocket: Received" << bytesRead << "bytes from" << sender.toString() << ":" << senderPort;
 
         CVector<uint8_t> vecbyRecBuf;
         vecbyRecBuf.Init(bytesRead);
@@ -84,7 +84,7 @@ void CConnectionlessSocket::onReadyRead()
         int iRecCounter;
         int iRecID;
         if (!CProtocol::ParseMessageFrame(vecbyRecBuf, vecbyRecBuf.Size(), vecbyMesBodyData, iRecCounter, iRecID)) {
-             qDebug() << "CConnectionlessSocket: Parsed message with ID" << iRecID;
+             //qDebug() << "CConnectionlessSocket: Parsed message with ID" << iRecID;
              if (CProtocol::IsConnectionLessMessageID(iRecID)) {
                 CHostAddress hostAddr;
                 hostAddr.InetAddr = sender;
