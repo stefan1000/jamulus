@@ -43,9 +43,10 @@
 class CConnectionlessSocket;
 
 /* Definitions ****************************************************************/
-#define AGGREGATOR_UPDATE_INTERVAL_MS   15000  // Interval to re-query directories and servers
-#define AGGREGATOR_SERVER_TIMEOUT_MS    30000 // Time after which a non-responding server is considered offline
-#define AGGREGATOR_DIRECTORY_TIMEOUT_MS 60000 // Time after which a non-responding directory is considered offline
+#define AGGREGATOR_UPDATE_INTERVAL_MS           15000  // Interval to re-query directories and servers
+#define AGGREGATOR_UPDATE_CLIENTS_INTERVAL_MS   30000 // Interval to force re-fetching client list
+#define AGGREGATOR_SERVER_TIMEOUT_MS            30000 // Time after which a non-responding server is considered offline
+#define AGGREGATOR_DIRECTORY_TIMEOUT_MS         60000 // Time after which a non-responding directory is considered offline
 
 /* Data Structures ************************************************************/
 struct Client
@@ -86,6 +87,8 @@ struct Server
     QList<Client> clients;
     QDateTime     lastModified;
     QDateTime     lastPingResponse;
+    int           lastNumClients{};        // Store the last reported number of clients
+    QDateTime     lastClientListFetch; // Timestamp of the last client list fetch
 
     QJsonObject toJson(bool detailed) const;
 };

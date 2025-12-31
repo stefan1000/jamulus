@@ -3,6 +3,7 @@
 #include "util.h"
 #include <QDebug>
 #include <QCryptographicHash>
+#include <algorithm> // Required for std::sort
 
 namespace
 {
@@ -48,12 +49,12 @@ QJsonObject Client::toJson(bool detailed) const
     obj["country"]      = country;
     if (detailed) {
         obj["countryid"]    = countryid;
+        obj["skillid"]      = skillid;
+        obj["skill"]        = skill;
     }
     obj["instrumentid"] = instrumentid;
-    obj["skillid"]      = skillid;
     obj["country_code"] = country_code;
     obj["instrument"]   = instrument;
-    obj["skill"]        = skill;
     obj["name"]         = name;
     obj["city"]         = city;
     return obj;
@@ -314,7 +315,7 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
 
 void CClientAggregator::onPingTimeReceived ( const CHostAddress& inetAddr, int iPingTime, int iNumClients )
 {
-    qDebug() << "ClientAggregator: Received ping from" << inetAddr.toString() << "- Ping:" << iPingTime << "Clients:" << iNumClients;
+    // qDebug() << "ClientAggregator: Received ping from" << inetAddr.toString() << "- Ping:" << iPingTime << "Clients:" << iNumClients;
     // Find which directory this server belongs to
     for ( auto& directory : m_directories )
     {
@@ -323,10 +324,39 @@ void CClientAggregator::onPingTimeReceived ( const CHostAddress& inetAddr, int i
             const QDateTime now = QDateTime::currentDateTime();
             server->ping        = iPingTime;
             server->nclients    = iNumClients; // Update nclients directly from ping response
-            if ( iNumClients > 0 )
-            {
-                m_protocol.CreateCLReqConnClientsListMes ( inetAddr );
+
+            bool shouldRequestClientList = false;
+
+            if (iNumClients > 0) {
+                // Condition 1: Number of clients changed
+                if (iNumClients != server->lastNumClients) {
+                    shouldRequestClientList = true;
+                }
+                // Condition 2: Last fetch was too long ago
+                if (!shouldRequestClientList && server->lastClientListFetch.isValid() &&
+                    server->lastClientListFetch.msecsTo(now) > AGGREGATOR_UPDATE_CLIENTS_INTERVAL_MS) {
+                    shouldRequestClientList = true;
+                }
+                // Condition 3: No valid last fetch time, but clients reported
+                if (!shouldRequestClientList && !server->lastClientListFetch.isValid()) {
+                    shouldRequestClientList = true;
+                }
+
+                if (shouldRequestClientList) {
+                    //qDebug() << "ClientAggregator: Requesting connected clients list for" << normalizedIpString(inetAddr.InetAddr) << "due to condition change/timeout.";
+                    m_protocol.CreateCLReqConnClientsListMes ( inetAddr );
+                    server->lastClientListFetch = now; // Update fetch timestamp
+                }
+            } else { // iNumClients == 0
+                // If ping reports 0 clients, clear the client list if it's not already empty
+                if (!server->clients.isEmpty()) {
+                    //qDebug() << "ClientAggregator: Clearing client list for" << normalizedIpString(inetAddr.InetAddr) << "as ping reports 0 clients.";
+                    server->clients.clear();
+                }
+                server->lastClientListFetch = QDateTime(); // Reset last fetch time
             }
+
+            server->lastNumClients = iNumClients; // Update last reported client count
             server->lastPingResponse = now;
             server->lastModified     = now;
             directory.lastModified   = now;
@@ -354,11 +384,11 @@ void CClientAggregator::onVersionReceived ( const CHostAddress& inetAddr, COSUti
 
 void CClientAggregator::onConnClientsListMesReceived ( const CHostAddress& inetAddr, const CVector<CChannelInfo>& vecChanInfo )
 {
-    qDebug() << "ClientAggregator: Received client list from" << inetAddr.toString() << "with" << vecChanInfo.Size() << "clients.";
+    // qDebug() << "ClientAggregator: Received client list from" << inetAddr.toString() << "with" << vecChanInfo.Size() << "clients.";
 
     for ( auto& directory : m_directories )
     {
-        if ( Server* server = getServer ( directory.address, inetAddr.InetAddr.toString(), inetAddr.iPort ) )
+        if ( Server* server = getServer ( directory.address, normalizedIpString(inetAddr.InetAddr), inetAddr.iPort ) )
         {
             const QDateTime now = QDateTime::currentDateTime();
             server->clients.clear();
@@ -379,6 +409,11 @@ void CClientAggregator::onConnClientsListMesReceived ( const CHostAddress& inetA
                 newClient.lastModified = now;
                 server->clients.append ( newClient );
             }
+
+            // Sort clients by chanid
+            std::sort(server->clients.begin(), server->clients.end(), [](const Client& a, const Client& b) {
+                return a.chanid < b.chanid;
+            });
 
             server->lastModified   = now;
             directory.lastModified = now;
@@ -524,13 +559,13 @@ QByteArray CClientAggregator::getJson() const
 {
     QMutexLocker locker ( &m_cacheMutex );
     QJsonArray serverList;
-    int        index = 0;
+    
     for ( const auto& directory : m_directories )
     {
         for ( const auto& server : directory.servers )
         {
             QJsonObject serverObj = server.toJson(m_detailedJson);
-            serverObj["index"]    = index++;
+            
             serverList.append ( serverObj );
         }
     }
