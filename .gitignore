@@ -58,3 +58,8 @@ jamulus_plugin_import.cpp
 /debian/
 /src/servers.php
 /src/explanation.txt
+/src/compare_servers.ps1
+/src/debug_protocol_instructions.txt
+/src/reason_for_blockage.txt
+/src/status_update.txt
+/src/task_complete.txt
