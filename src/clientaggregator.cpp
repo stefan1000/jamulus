@@ -71,7 +71,7 @@ QJsonObject Server::toJson(bool detailed) const
     obj["city"]        = city;
     obj["ip"]          = ip;
     obj["nclients"]    = nclients;
-
+    obj["lastClientListReceived"] = lastClientListReceived.isValid() ? lastClientListReceived.toString ( Qt::ISODate ) : QString();
     if (detailed) {
         obj["numip"]       = static_cast<qint64> ( numip );
         obj["countryid"]   = countryid;
@@ -81,6 +81,7 @@ QJsonObject Server::toJson(bool detailed) const
         obj["os"]          = os;
         obj["version"]     = version;
         obj["versionsort"] = versionsort;
+        
     }
 
     QJsonArray clientsArray;
@@ -317,9 +318,10 @@ void CClientAggregator::onPingTimeReceived ( const CHostAddress& inetAddr, int i
 {
     // qDebug() << "ClientAggregator: Received ping from" << inetAddr.toString() << "- Ping:" << iPingTime << "Clients:" << iNumClients;
     // Find which directory this server belongs to
+   
     for ( auto& directory : m_directories )
     {
-        if ( Server* server = getServer ( directory.address, normalizedIpString(inetAddr.InetAddr), inetAddr.iPort ) )
+        if ( Server* server = getServer ( directory.address, normalizedIpString ( inetAddr.InetAddr ), inetAddr.iPort ) )
         {
             const QDateTime now = QDateTime::currentDateTime();
             server->ping        = iPingTime;
@@ -327,42 +329,54 @@ void CClientAggregator::onPingTimeReceived ( const CHostAddress& inetAddr, int i
 
             bool shouldRequestClientList = false;
 
-            if (iNumClients > 0) {
+            if ( iNumClients > 0 )
+            {
                 // Condition 1: Number of clients changed
-                if (iNumClients != server->lastNumClients) {
+                if ( iNumClients != server->lastNumClients )
+                {
                     shouldRequestClientList = true;
                 }
                 // Condition 2: Last fetch was too long ago
-                if (!shouldRequestClientList && server->lastClientListFetch.isValid() &&
-                    server->lastClientListFetch.msecsTo(now) > AGGREGATOR_UPDATE_CLIENTS_INTERVAL_MS) {
+                if ( !shouldRequestClientList && server->lastClientListFetch.isValid() &&
+                     server->lastClientListFetch.msecsTo ( now ) > AGGREGATOR_UPDATE_CLIENTS_INTERVAL_MS )
+                {
                     shouldRequestClientList = true;
                 }
                 // Condition 3: No valid last fetch time, but clients reported
-                if (!shouldRequestClientList && !server->lastClientListFetch.isValid()) {
+                if ( !shouldRequestClientList && !server->lastClientListFetch.isValid() )
+                {
                     shouldRequestClientList = true;
                 }
 
-                if (shouldRequestClientList) {
-                    //qDebug() << "ClientAggregator: Requesting connected clients list for" << normalizedIpString(inetAddr.InetAddr) << "due to condition change/timeout.";
+                if ( shouldRequestClientList )
+                {
+                    // qDebug() << "ClientAggregator: Requesting connected clients list for" << normalizedIpString(inetAddr.InetAddr) << "due to
+                    // condition change/timeout.";
                     m_protocol.CreateCLReqConnClientsListMes ( inetAddr );
                     server->lastClientListFetch = now; // Update fetch timestamp
                 }
-            } else { // iNumClients == 0
+            }
+            else
+            { // iNumClients == 0
                 // If ping reports 0 clients, clear the client list if it's not already empty
-                if (!server->clients.isEmpty()) {
-                    //qDebug() << "ClientAggregator: Clearing client list for" << normalizedIpString(inetAddr.InetAddr) << "as ping reports 0 clients.";
+                if ( !server->clients.isEmpty() )
+                {
+                    // qDebug() << "ClientAggregator: Clearing client list for" << normalizedIpString(inetAddr.InetAddr) << "as ping reports 0
+                    // clients.";
                     server->clients.clear();
                 }
                 server->lastClientListFetch = QDateTime(); // Reset last fetch time
             }
 
-            server->lastNumClients = iNumClients; // Update last reported client count
+            server->lastNumClients   = iNumClients; // Update last reported client count
             server->lastPingResponse = now;
             server->lastModified     = now;
             directory.lastModified   = now;
+            
             break; // Assume server is in one directory only
-        }
+        }        
     }
+    
 }
 
 void CClientAggregator::onVersionReceived ( const CHostAddress& inetAddr, COSUtil::EOpSystemType eOSType, const QString& version )
@@ -415,9 +429,14 @@ void CClientAggregator::onConnClientsListMesReceived ( const CHostAddress& inetA
                 return a.chanid < b.chanid;
             });
 
+            server->lastClientListReceived = now; // Update the timestamp when client list was received
             server->lastModified   = now;
             directory.lastModified = now;
             break; // Assume server is in one directory only
+        }
+        else
+        {
+            qWarning() << "ClientAggregator: Received client list from unknown server" << inetAddr.toString();
         }
     }
 }
@@ -451,6 +470,7 @@ void CClientAggregator::updateOrAddServer ( const QString& directoryAddress, con
             QList<Client> clients  = it->clients;
             QDateTime     lastPing = it->lastPingResponse;
             int           numClients = it->nclients;
+            QDateTime     lastClientListReceived = it->lastClientListReceived; // Preserve this field
 
             // Update specific fields that come from the directory server list
             it->ip           = server.ip;
@@ -468,6 +488,7 @@ void CClientAggregator::updateOrAddServer ( const QString& directoryAddress, con
             it->clients            = clients;
             it->lastPingResponse   = lastPing;
             it->nclients           = numClients;
+            it->lastClientListReceived = lastClientListReceived; // Restore this field
         }
         else
         {
@@ -558,18 +579,38 @@ Client* CClientAggregator::getClient ( const QString& directoryAddress, const QS
 QByteArray CClientAggregator::getJson() const
 {
     QMutexLocker locker ( &m_cacheMutex );
-    QJsonArray serverList;
-    
+    QJsonObject topLevelObject;
+    QJsonArray directoriesArray;
+    QJsonArray serversArray;
+
+    QMap<QString, int> directoryIdMap;
+    int nextDirectoryId = 0;
+
     for ( const auto& directory : m_directories )
     {
+        // Add directory to directoriesArray
+        QJsonObject directoryObj;
+        int currentDirectoryId = nextDirectoryId++;
+        directoryIdMap.insert(directory.address, currentDirectoryId);
+
+        directoryObj["id"]        = currentDirectoryId;
+        directoryObj["address"]   = directory.address;
+        directoryObj["numservers"] = directory.servers.size();
+        directoriesArray.append(directoryObj);
+
+        // Add servers to serversArray, with directory ID
         for ( const auto& server : directory.servers )
         {
             QJsonObject serverObj = server.toJson(m_detailedJson);
-            
-            serverList.append ( serverObj );
+            serverObj["directory"] = currentDirectoryId;
+            serversArray.append ( serverObj );
         }
     }
-    QByteArray d = QJsonDocument ( serverList ).toJson ( QJsonDocument::Indented );
+
+    topLevelObject["directories"] = directoriesArray;
+    topLevelObject["servers"]     = serversArray;
+
+    QByteArray d = QJsonDocument ( topLevelObject ).toJson ( QJsonDocument::Indented );
 
     return d;
 }
@@ -682,7 +723,7 @@ void CJamStatusServer::onReadyRead()
     if ( !socket )
         return;
 
-    QByteArray      requestData  = socket->readAll();
+    QByteArray        requestData  = socket->readAll();
     QList<QByteArray> requestLines = requestData.split ( '\n' );
     if ( requestLines.isEmpty() )
     {
@@ -708,7 +749,7 @@ void CJamStatusServer::onReadyRead()
     }
 
     QByteArray ifNoneMatch;
-    bool acceptDeflate = false;
+    bool       acceptDeflate = false;
     for ( const QByteArray& line : requestLines )
     {
         QByteArray lower = line.toLower();
@@ -740,30 +781,37 @@ void CJamStatusServer::onReadyRead()
 
     if ( acceptDeflate )
     {
-        // Client accepts deflate: qCompress output is zlib with 4-byte header; remove first 4 bytes to produce raw deflate
-        QByteArray deflateData = compressedJson;
-        if ( deflateData.size() > 6 ) // Ensure there's enough data to strip header (2 bytes) and trailer (4 bytes)
-        {
-            // Strip 2-byte zlib header and 4-byte zlib checksum to get raw deflate
-            deflateData = deflateData.mid(2, deflateData.size() - 6);
-        }
-        else // Handle cases where data is too small to be valid zlib/deflate
-        {
-            deflateData.clear(); // Send empty or error if data is malformed
-        }
+        // qCompress format: 4-byte size header + 2-byte zlib header + deflate data + 4-byte Adler-32
+        QByteArray qCompressData = compressedJson;
 
-        responseHeader.append ( "HTTP/1.1 200 OK\r\n" );
-        responseHeader.append ( "Content-Type: application/json\r\n" );
-        responseHeader.append ( "Content-Encoding: deflate\r\n" );
-        responseHeader.append ( "ETag: " + etag + "\r\n" );
-        responseHeader.append ( "Content-Length: " + QByteArray::number ( deflateData.size() ) + "\r\n" );
-        responseHeader.append ( "\r\n" );
+        if ( qCompressData.size() > 10 )
+        {
+            // Skip the 4-byte qCompress header to get zlib format data
+            QByteArray zlibData = qCompressData.mid ( 4 );
 
-        body = deflateData;
+            // For "deflate" Content-Encoding, browsers expect zlib format (RFC 1950)
+            // which is: 2-byte header + deflate data + 4-byte Adler-32 checksum
+            // This is exactly what we have after stripping the qCompress header
+
+            responseHeader.append ( "HTTP/1.1 200 OK\r\n" );
+            responseHeader.append ( "Content-Type: application/json\r\n" );
+            responseHeader.append ( "Content-Encoding: deflate\r\n" );
+            responseHeader.append ( "ETag: " + etag + "\r\n" );
+            responseHeader.append ( "Content-Length: " + QByteArray::number ( zlibData.size() ) + "\r\n" );
+            responseHeader.append ( "\r\n" );
+
+            body = zlibData;
+        }
+        else
+        {
+            // Fallback to uncompressed if compressed data is invalid
+            acceptDeflate = false;
+        }
     }
-    else
+
+    if ( !acceptDeflate )
     {
-        // Send uncompressed JSON (client likely doesn't accept compression)
+        // Send uncompressed JSON
         QByteArray raw = m_aggregator->getJson();
         responseHeader.append ( "HTTP/1.1 200 OK\r\n" );
         responseHeader.append ( "Content-Type: application/json\r\n" );

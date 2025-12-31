@@ -89,6 +89,7 @@ struct Server
     QDateTime     lastPingResponse;
     int           lastNumClients{};        // Store the last reported number of clients
     QDateTime     lastClientListFetch; // Timestamp of the last client list fetch
+    QDateTime     lastClientListReceived; // Timestamp when the client list was last received
 
     QJsonObject toJson(bool detailed) const;
 };

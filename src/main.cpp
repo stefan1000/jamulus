@@ -944,7 +944,18 @@ int main ( int argc, char** argv )
                 qCritical() << "Aggregator mode requires an http port via --httpport";
                 exit(1);
             }
-            QStringList directoryAddresses = {  "anygenre1.jamulus.io:22124"} ;
+#if 1
+            QStringList directoryAddresses = { DEFAULT_SERVER_ADDRESS ":" + QString::number ( DEFAULT_PORT_NUMBER ),
+                                               CENTSERV_ANY_GENRE2,
+                                               CENTSERV_ANY_GENRE3,
+                                               CENTSERV_GENRE_ROCK,
+                                               CENTSERV_GENRE_JAZZ,
+                                               CENTSERV_GENRE_CLASSICAL_FOLK,
+                                               CENTSERV_GENRE_CHORAL };
+#else
+            QStringList directoryAddresses = { "anygenre1.jamulus.io:22124" };
+#endif
+
             const bool        detailedJson       = false;
             CClientAggregator aggregator ( directoryAddresses, detailedJson, pApp );
             aggregator.start();
