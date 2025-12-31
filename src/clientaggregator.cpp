@@ -69,7 +69,7 @@ QJsonObject Server::toJson(bool detailed) const
     obj["country"]     = country;
     obj["city"]        = city;
     obj["ip"]          = ip;
-    obj["nclients"]    = clients.count();
+    obj["nclients"]    = nclients;
 
     if (detailed) {
         obj["numip"]       = static_cast<qint64> ( numip );
@@ -191,7 +191,7 @@ void CClientAggregator::queryServers()
             CHostAddress haServerAddress;
             if ( NetworkUtil().ParseNetworkAddress ( server.ip + ":" + QString::number ( server.port ), haServerAddress, true ) )
             {
-                m_protocol.CreateCLPingMes ( haServerAddress, QDateTime::currentMSecsSinceEpoch() );
+                m_protocol.CreateCLPingWithNumClientsMes ( haServerAddress, QDateTime::currentMSecsSinceEpoch(), 0 /* dummy iNumClients for request */ );
                 if ( server.version.isEmpty() )
                 {
                     m_protocol.CreateCLReqVersionAndOSMes ( haServerAddress );
@@ -318,14 +318,13 @@ void CClientAggregator::onPingTimeReceived ( const CHostAddress& inetAddr, int i
     // Find which directory this server belongs to
     for ( auto& directory : m_directories )
     {
-        if ( Server* server = getServer ( directory.address, inetAddr.InetAddr.toString(), inetAddr.iPort ) )
+        if ( Server* server = getServer ( directory.address, normalizedIpString(inetAddr.InetAddr), inetAddr.iPort ) )
         {
             const QDateTime now = QDateTime::currentDateTime();
             server->ping        = iPingTime;
-            // server->nclients is derived from clients.count(), but we can store num here temporarily
-            if ( server->clients.count() != iNumClients )
+            server->nclients    = iNumClients; // Update nclients directly from ping response
+            if ( iNumClients > 0 )
             {
-                // Logic to request client list can be added here if needed
                 m_protocol.CreateCLReqConnClientsListMes ( inetAddr );
             }
             server->lastPingResponse = now;
@@ -338,7 +337,7 @@ void CClientAggregator::onPingTimeReceived ( const CHostAddress& inetAddr, int i
 
 void CClientAggregator::onVersionReceived ( const CHostAddress& inetAddr, COSUtil::EOpSystemType eOSType, const QString& version )
 {
-    qDebug() << "ClientAggregator: Received version from" << inetAddr.toString() << "- Version:" << version;
+    // qDebug() << "ClientAggregator: Received version from" << inetAddr.toString() << "- Version:" << version;
     for ( auto& directory : m_directories )
     {
         if ( Server* server = getServer ( directory.address, inetAddr.InetAddr.toString(), inetAddr.iPort ) )
@@ -413,9 +412,10 @@ void CClientAggregator::updateOrAddServer ( const QString& directoryAddress, con
 
         if ( it != dir->servers.end() )
         {
-            // Preserve client list and ping response time
+            // Preserve client list, ping response time, and client count
             QList<Client> clients  = it->clients;
             QDateTime     lastPing = it->lastPingResponse;
+            int           numClients = it->nclients;
 
             // Update specific fields that come from the directory server list
             it->ip           = server.ip;
@@ -432,6 +432,7 @@ void CClientAggregator::updateOrAddServer ( const QString& directoryAddress, con
             // Restore preserved fields
             it->clients            = clients;
             it->lastPingResponse   = lastPing;
+            it->nclients           = numClients;
         }
         else
         {
@@ -528,15 +529,12 @@ QByteArray CClientAggregator::getJson() const
     {
         for ( const auto& server : directory.servers )
         {
-            QJsonObject serverObj = server.toJson(false);
+            QJsonObject serverObj = server.toJson(m_detailedJson);
             serverObj["index"]    = index++;
             serverList.append ( serverObj );
         }
     }
     QByteArray d = QJsonDocument ( serverList ).toJson ( QJsonDocument::Indented );
-
-    const char* dPtr = d.constData();
-    dPtr;
 
     return d;
 }
@@ -578,6 +576,16 @@ void CClientAggregator::startHttpServer ( quint16 port )
     connect ( m_httpServerThread, &QThread::started, m_httpServer, &CJamStatusServer::start );
     connect ( m_httpServerThread, &QThread::finished, m_httpServer, &QObject::deleteLater );
     m_httpServerThread->start();
+}
+
+QString CClientAggregator::normalizedIpString(const QHostAddress& qhAddr) {
+    if (qhAddr.protocol() == QAbstractSocket::IPv6Protocol && qhAddr.toIPv4Address() != 0) {
+        // It's an IPv4-mapped IPv6 address, convert to IPv4 string
+        return QHostAddress(qhAddr.toIPv4Address()).toString();
+    } else {
+        // It's a pure IPv4 or pure IPv6 address, use its toString() representation
+        return qhAddr.toString();
+    }
 }
 
 

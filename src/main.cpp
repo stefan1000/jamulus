@@ -945,7 +945,8 @@ int main ( int argc, char** argv )
                 exit(1);
             }
             QStringList directoryAddresses = {  "anygenre1.jamulus.io:22124"} ;
-            CClientAggregator aggregator(directoryAddresses, pApp);
+            const bool        detailedJson       = false;
+            CClientAggregator aggregator ( directoryAddresses, detailedJson, pApp );
             aggregator.start();
             aggregator.startHttpServer(iHttpPort);
             pApp->exec();

@@ -43,9 +43,9 @@
 class CConnectionlessSocket;
 
 /* Definitions ****************************************************************/
-#define AGGREGATOR_UPDATE_INTERVAL_MS   5000  // Interval to re-query directories and servers
+#define AGGREGATOR_UPDATE_INTERVAL_MS   15000  // Interval to re-query directories and servers
 #define AGGREGATOR_SERVER_TIMEOUT_MS    30000 // Time after which a non-responding server is considered offline
-#define AGGREGATOR_DIRECTORY_TIMEOUT_MS 20000 // Time after which a non-responding directory is considered offline
+#define AGGREGATOR_DIRECTORY_TIMEOUT_MS 60000 // Time after which a non-responding directory is considered offline
 
 /* Data Structures ************************************************************/
 struct Client
@@ -82,6 +82,7 @@ struct Server
     QString       os;
     QString       version;
     QString       versionsort;
+    int           nclients{}; // Added to store the actual number of clients from ping
     QList<Client> clients;
     QDateTime     lastModified;
     QDateTime     lastPingResponse;
@@ -180,4 +181,6 @@ private:
     mutable QByteArray m_jsonCache;
     mutable QDateTime m_cacheTimestamp;
     mutable QByteArray m_etag;
+
+    static QString normalizedIpString(const QHostAddress& qhAddr);
 };
