@@ -102,6 +102,32 @@ struct Directory
     QDateTime     lastSuccessfulUpdate;
 };
 
+struct QueryParameters
+{
+    bool hideEmpty = false; // Filter servers with 0 clients
+
+    QString getKey() const
+    {
+        QString key;
+        if ( hideEmpty )
+            key += "hideEmpty=1";
+        return key.isEmpty() ? "default" : key;
+    }
+
+    bool isValid() const
+    {
+        // All parameters in this struct are valid - add checks here if needed
+        return true;
+    }
+};
+
+struct JsonCacheData
+{
+    QByteArray jsonCache;
+    QDateTime  cacheTimestamp;
+    QByteArray etag;
+};
+
 class CClientAggregator;
 
 class CJamStatusServer : public QObject
@@ -154,9 +180,9 @@ public:
     Client* getClient ( const QString& directoryAddress, const QString& serverIp, quint16 port, int chanId );
 
     // Serialization
-    QByteArray getJson() const;
-    QByteArray getJsonLocked() const;  // Internal: called with both mutexes already locked
-    QByteArray getCompressedJson(QByteArray& etag);
+    QByteArray getJson(const QueryParameters& params = QueryParameters()) const;
+    QByteArray getJsonLocked(const QueryParameters& params) const;  // Internal: called with both mutexes already locked
+    QByteArray getCompressedJson(QByteArray& etag, const QueryParameters& params = QueryParameters());
 
 
     void start();
@@ -186,9 +212,7 @@ private:
 
     mutable QRecursiveMutex m_dataMutex;      // Protects m_directories
     mutable QRecursiveMutex m_cacheMutex;
-    mutable QByteArray m_jsonCache;
-    mutable QDateTime m_cacheTimestamp;
-    mutable QByteArray m_etag;
-
+    mutable QMap<QString, JsonCacheData> m_jsonCaches;             // Cache per parameter set
+    
     static QString normalizedIpString(const QHostAddress& qhAddr);
 };

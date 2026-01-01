@@ -596,14 +596,14 @@ Client* CClientAggregator::getClient ( const QString& directoryAddress, const QS
     return nullptr;
 }
 
-QByteArray CClientAggregator::getJson() const
+QByteArray CClientAggregator::getJson(const QueryParameters& params) const
 {
     QMutexLocker lockerData ( &m_dataMutex );
     QMutexLocker lockerCache ( &m_cacheMutex );
-    return getJsonLocked();
+    return getJsonLocked(params);
 }
 
-QByteArray CClientAggregator::getJsonLocked() const
+QByteArray CClientAggregator::getJsonLocked(const QueryParameters& params) const
 {
     // Called with both m_dataMutex and m_cacheMutex already locked
     QJsonObject topLevelObject;
@@ -622,12 +622,37 @@ QByteArray CClientAggregator::getJsonLocked() const
 
         directoryObj["id"]        = currentDirectoryId;
         directoryObj["address"]   = directory.address;
-        directoryObj["numservers"] = directory.servers.size();
+
+        // Count servers based on hideEmpty filter
+        int serverCount = 0;
+        if (params.hideEmpty)
+        {
+            serverCount = 0;
+            for (const auto& server : directory.servers)
+            {
+                if (server.nclients > 0)
+                {
+                    serverCount++;
+                }
+            }
+        }
+        else
+        {
+            serverCount = directory.servers.size();
+        }
+
+        directoryObj["numservers"] = serverCount;
         directoriesArray.append(directoryObj);
 
         // Add servers to serversArray, with directory ID
         for ( const auto& server : directory.servers )
         {
+            // Skip servers with 0 clients if hideEmpty is true
+            if (params.hideEmpty && server.nclients == 0)
+            {
+                continue;
+            }
+
             QJsonObject serverObj = server.toJson(m_detailedJson);
             serverObj["directory"] = currentDirectoryId;
             serversArray.append ( serverObj );
@@ -642,10 +667,20 @@ QByteArray CClientAggregator::getJsonLocked() const
     return d;
 }
 
-QByteArray CClientAggregator::getCompressedJson ( QByteArray& etag )
+QByteArray CClientAggregator::getCompressedJson ( QByteArray& etag, const QueryParameters& params )
 {
     QMutexLocker lockerData ( &m_dataMutex );
     QMutexLocker lockerCache ( &m_cacheMutex );
+
+    QString cacheKey = params.getKey();
+
+    // Get or create cache entry for this parameter set
+    if (!m_jsonCaches.contains(cacheKey))
+    {
+        m_jsonCaches[cacheKey] = JsonCacheData();
+    }
+
+    JsonCacheData& cacheData = m_jsonCaches[cacheKey];
 
     QDateTime mostRecentChange;
     for ( const auto& directory : m_directories )
@@ -656,17 +691,17 @@ QByteArray CClientAggregator::getCompressedJson ( QByteArray& etag )
         }
     }
 
-    if ( mostRecentChange > m_cacheTimestamp )
+    if ( mostRecentChange > cacheData.cacheTimestamp )
     {
         // Use the internal version that doesn't require additional locks
-        QByteArray raw = getJsonLocked();
-        m_jsonCache      = qCompress ( raw, 9 );
-        m_cacheTimestamp = mostRecentChange;
-        m_etag           = QCryptographicHash::hash ( raw, QCryptographicHash::Sha1 ).toHex();
+        QByteArray raw = getJsonLocked(params);
+        cacheData.jsonCache      = qCompress ( raw, 9 );
+        cacheData.cacheTimestamp = mostRecentChange;
+        cacheData.etag           = QCryptographicHash::hash ( raw, QCryptographicHash::Sha1 ).toHex();
     }
 
-    etag = m_etag;
-    return m_jsonCache;
+    etag = cacheData.etag;
+    return cacheData.jsonCache;
 }
 
 void CClientAggregator::startHttpServer ( quint16 port )
@@ -770,11 +805,44 @@ void CJamStatusServer::onReadyRead()
     QByteArray method = requestLine.at ( 0 ).toUpper();
     QByteArray path   = requestLine.at ( 1 );
 
-    if ( path != "/jamstatus" )
+    // Parse query parameters from path
+    QueryParameters params;
+    int questionMarkPos = path.indexOf ( '?' );
+    if ( questionMarkPos != -1 )
     {
-        socket->write ( "HTTP/1.1 404 Not Found\r\n\r\n" );
-        socket->close();
-        return;
+        QByteArray pathOnly = path.left ( questionMarkPos );
+        QByteArray queryString = path.mid ( questionMarkPos + 1 );
+
+        if ( pathOnly != "/jamstatus" )
+        {
+            socket->write ( "HTTP/1.1 404 Not Found\r\n\r\n" );
+            socket->close();
+            return;
+        }
+
+        // Parse query parameters - only accept known parameters
+        QList<QByteArray> queryParts = queryString.split ( '&' );
+        for ( const QByteArray& part : queryParts )
+        {
+            int eqPos = part.indexOf ( '=' );
+            QByteArray key = ( eqPos != -1 ) ? part.left ( eqPos ) : part;
+            QByteArray value = ( eqPos != -1 ) ? part.mid ( eqPos + 1 ) : QByteArray();
+
+            if ( key == "hideEmpty" )
+            {
+                params.hideEmpty = ( value == "1" || value == "true" );
+            }
+            // Add more parameter handling here as needed
+        }
+    }
+    else
+    {
+        if ( path != "/jamstatus" )
+        {
+            socket->write ( "HTTP/1.1 404 Not Found\r\n\r\n" );
+            socket->close();
+            return;
+        }
     }
 
     QByteArray ifNoneMatch;
@@ -794,7 +862,7 @@ void CJamStatusServer::onReadyRead()
     }
 
     QByteArray etag;
-    QByteArray compressedJson = m_aggregator->getCompressedJson ( etag );
+    QByteArray compressedJson = m_aggregator->getCompressedJson ( etag, params );
 
     if ( ifNoneMatch == etag )
     {
@@ -841,7 +909,7 @@ void CJamStatusServer::onReadyRead()
     if ( !acceptDeflate )
     {
         // Send uncompressed JSON
-        QByteArray raw = m_aggregator->getJson();
+        QByteArray raw = m_aggregator->getJson(params);
         responseHeader.append ( "HTTP/1.1 200 OK\r\n" );
         responseHeader.append ( "Content-Type: application/json\r\n" );
         responseHeader.append ( "ETag: " + etag + "\r\n" );
