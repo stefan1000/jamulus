@@ -66,3 +66,4 @@ jamulus_plugin_import.cpp
 /bak/compare_servers.ps1
 /build.bat
 .vs/
+/geolocation_cache.json
