@@ -65,3 +65,4 @@ jamulus_plugin_import.cpp
 /src/task_complete.txt
 /bak/compare_servers.ps1
 /build.bat
+.vs/

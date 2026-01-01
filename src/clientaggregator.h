@@ -147,10 +147,20 @@ private slots:
     void onDisconnected();
 
 private:
+    // Helper methods for HTTP request processing
+    static int findEndOfHeaders ( const QByteArray& data );
+    void processCompleteRequest ( QTcpSocket* socket, const QByteArray& completeRequest );
+
     CClientAggregator* m_aggregator;
     QTcpServer* m_server;
     quint16 m_port;
     QList<QTcpSocket*> m_clients;
+    
+    // Per-socket request buffering
+    QMap<QTcpSocket*, QByteArray> m_socketBuffers;
+    
+    // Maximum allowed HTTP request size (64 KB for DoS protection)
+    static constexpr int MAX_REQUEST_SIZE = 65536;
 };
 
 /* Classes ********************************************************************/
