@@ -951,7 +951,9 @@ int main ( int argc, char** argv )
                                                CENTSERV_GENRE_ROCK,
                                                CENTSERV_GENRE_JAZZ,
                                                CENTSERV_GENRE_CLASSICAL_FOLK,
-                                               CENTSERV_GENRE_CHORAL };
+                                               CENTSERV_GENRE_CHORAL
+                                               //
+                                               };
 #else
             QStringList directoryAddresses = { "anygenre1.jamulus.io:22124" };
 #endif

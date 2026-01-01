@@ -168,13 +168,14 @@ void CClientAggregator::onUpdateTimer()
 
 void CClientAggregator::queryDirectories()
 {
-    qDebug() << "ClientAggregator: Querying directories...";
+    QMutexLocker locker ( &m_dataMutex );
+    // qDebug() << "ClientAggregator: Querying directories...";
     for ( auto it = m_directories.begin(); it != m_directories.end(); ++it )
     {
         CHostAddress haDirectoryAddress;
         if ( NetworkUtil().ParseNetworkAddress ( it.key(), haDirectoryAddress, false ) )
         {
-            qDebug() << "ClientAggregator: Sending server list request to" << it.key();
+            // qDebug() << "ClientAggregator: Sending server list request to" << it.key();
             m_protocol.CreateCLReqServerListMes ( haDirectoryAddress );
         }
         else
@@ -186,6 +187,7 @@ void CClientAggregator::queryDirectories()
 
 void CClientAggregator::queryServers()
 {
+    QMutexLocker locker ( &m_dataMutex );
     for ( auto& directory : m_directories )
     {
         for ( auto& server : directory.servers )
@@ -205,6 +207,7 @@ void CClientAggregator::queryServers()
 
 void CClientAggregator::cleanupExpiredServers()
 {
+    QMutexLocker locker ( &m_dataMutex );
     const QDateTime now = QDateTime::currentDateTime();
     for ( auto& directory : m_directories )
     {
@@ -221,16 +224,18 @@ void CClientAggregator::cleanupExpiredServers()
 
 void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, const CVector<CServerInfo>& vecServerInfo )
 {
+    QMutexLocker locker ( &m_dataMutex );
     QString    directoryAddressStr = inetAddr.toString ( CHostAddress::SM_IP_PORT );
-    qDebug() << "ClientAggregator: Received server list from" << directoryAddressStr << "with" << vecServerInfo.Size() << "servers.";
-    // Find directory by IP, not by full address, as port can differ
+    // qDebug() << "ClientAggregator: Received server list from" << directoryAddressStr << "with" << vecServerInfo.Size() << "servers.";
+    // Find directory by IP AND PORT, not by IP alone (multiple directories can share same IP)
     Directory* dir = nullptr;
     for ( auto it = m_directories.begin(); it != m_directories.end(); ++it )
     {
         CHostAddress haDirAddr;
         if ( NetworkUtil().ParseNetworkAddress ( it.key(), haDirAddr, false ) )
         {
-            if ( haDirAddr.InetAddr.isEqual(inetAddr.InetAddr) )
+            // Match both IP and port to handle multiple directories on same IP with different ports
+            if ( haDirAddr.InetAddr.isEqual(inetAddr.InetAddr) && haDirAddr.iPort == inetAddr.iPort )
             {
                 dir = &it.value();
                 break;
@@ -261,12 +266,7 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
         {
             serverAddr = serverInfo.HostAddr;
         }
-                QString serverIp;
-                if (serverAddr.InetAddr.protocol() == QAbstractSocket::IPv6Protocol && serverAddr.InetAddr.toIPv4Address() != 0) {
-                    serverIp = QHostAddress(serverAddr.InetAddr.toIPv4Address()).toString();
-                } else {
-                    serverIp = serverAddr.InetAddr.toString();
-                }
+        QString serverIp = normalizedIpString(serverAddr.InetAddr);
         quint16      serverPort = serverAddr.iPort;
         QString      serverId   = serverIp + ":" + QString::number ( serverPort );
         receivedServers.insert ( serverId );
@@ -278,7 +278,7 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
             newServer.ip           = serverIp;
             newServer.port         = serverPort;
             newServer.numip        = serverAddr.InetAddr.toIPv4Address();
-            newServer.ipaddrs      = serverInfo.LHostAddr.toString(); // Add this line
+            newServer.ipaddrs      = serverInfo.LHostAddr.toString();
             newServer.name         = serverInfo.strName;
             newServer.city         = serverInfo.strCity;
             newServer.country      = QLocale::countryToString ( serverInfo.eCountry );
@@ -287,8 +287,8 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
             newServer.maxclients   = serverInfo.iMaxNumClients;
             newServer.perm         = serverInfo.bPermanentOnline;
             newServer.lastModified = now;
-            qDebug() << "ClientAggregator: Adding new server:" << newServer.name << "@" << serverId;
-            updateOrAddServer ( dir->address, newServer );
+            //qDebug() << "ClientAggregator: Adding new server:" << newServer.name << "@" << serverId;
+            updateOrAddServerLocked ( dir->address, newServer );
         }
         else
         {
@@ -316,140 +316,136 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
 
 void CClientAggregator::onPingTimeReceived ( const CHostAddress& inetAddr, int iPingTime, int iNumClients )
 {
+    QMutexLocker locker ( &m_dataMutex );
     // qDebug() << "ClientAggregator: Received ping from" << inetAddr.toString() << "- Ping:" << iPingTime << "Clients:" << iNumClients;
     // Find which directory this server belongs to
    
-    for ( auto& directory : m_directories )
+    if ( Server* server = getServerFromAnyDirectory(normalizedIpString ( inetAddr.InetAddr ), inetAddr.iPort ) )
     {
-        if ( Server* server = getServer ( directory.address, normalizedIpString ( inetAddr.InetAddr ), inetAddr.iPort ) )
+        const QDateTime now = QDateTime::currentDateTime();
+        server->ping        = iPingTime;
+        server->nclients    = iNumClients; // Update nclients directly from ping response
+
+        bool shouldRequestClientList = false;
+
+        if ( iNumClients > 0 )
         {
-            const QDateTime now = QDateTime::currentDateTime();
-            server->ping        = iPingTime;
-            server->nclients    = iNumClients; // Update nclients directly from ping response
-
-            bool shouldRequestClientList = false;
-
-            if ( iNumClients > 0 )
+            // Condition 1: Number of clients changed
+            if ( iNumClients != server->lastNumClients )
             {
-                // Condition 1: Number of clients changed
-                if ( iNumClients != server->lastNumClients )
-                {
-                    shouldRequestClientList = true;
-                }
-                // Condition 2: Last fetch was too long ago
-                if ( !shouldRequestClientList && server->lastClientListFetch.isValid() &&
-                     server->lastClientListFetch.msecsTo ( now ) > AGGREGATOR_UPDATE_CLIENTS_INTERVAL_MS )
-                {
-                    shouldRequestClientList = true;
-                }
-                // Condition 3: No valid last fetch time, but clients reported
-                if ( !shouldRequestClientList && !server->lastClientListFetch.isValid() )
-                {
-                    shouldRequestClientList = true;
-                }
-
-                if ( shouldRequestClientList )
-                {
-                    // qDebug() << "ClientAggregator: Requesting connected clients list for" << normalizedIpString(inetAddr.InetAddr) << "due to
-                    // condition change/timeout.";
-                    m_protocol.CreateCLReqConnClientsListMes ( inetAddr );
-                    server->lastClientListFetch = now; // Update fetch timestamp
-                }
+                shouldRequestClientList = true;
             }
-            else
-            { // iNumClients == 0
-                // If ping reports 0 clients, clear the client list if it's not already empty
-                if ( !server->clients.isEmpty() )
-                {
-                    // qDebug() << "ClientAggregator: Clearing client list for" << normalizedIpString(inetAddr.InetAddr) << "as ping reports 0
-                    // clients.";
-                    server->clients.clear();
-                }
-                server->lastClientListFetch = QDateTime(); // Reset last fetch time
+            // Condition 2: Last fetch was too long ago
+            if ( !shouldRequestClientList && server->lastClientListFetch.isValid() &&
+                 server->lastClientListFetch.msecsTo ( now ) > AGGREGATOR_UPDATE_CLIENTS_INTERVAL_MS )
+            {
+                shouldRequestClientList = true;
+            }
+            // Condition 3: No valid last fetch time, but clients reported
+            if ( !shouldRequestClientList && !server->lastClientListFetch.isValid() )
+            {
+                shouldRequestClientList = true;
             }
 
-            server->lastNumClients   = iNumClients; // Update last reported client count
-            server->lastPingResponse = now;
-            server->lastModified     = now;
-            directory.lastModified   = now;
-            
-            break; // Assume server is in one directory only
-        }        
-    }
+            if ( shouldRequestClientList )
+            {
+                // qDebug() << "ClientAggregator: Requesting connected clients list for" << normalizedIpString(inetAddr.InetAddr) << "due to
+                // condition change/timeout.";
+                m_protocol.CreateCLReqConnClientsListMes ( inetAddr );
+                server->lastClientListFetch = now; // Update fetch timestamp
+            }
+        }
+        else
+        { // iNumClients == 0
+            // If ping reports 0 clients, clear the client list if it's not already empty
+            if ( !server->clients.isEmpty() )
+            {
+                // qDebug() << "ClientAggregator: Clearing client list for" << normalizedIpString(inetAddr.InetAddr) << "as ping reports 0
+                // clients.";
+                server->clients.clear();
+            }
+            server->lastClientListFetch = QDateTime(); // Reset last fetch time
+        }
+
+        server->lastNumClients   = iNumClients; // Update last reported client count
+        server->lastPingResponse = now;
+        server->lastModified     = now;
+        // directory.lastModified = now; // Update removed from here as server is now retrieved from helper function.
+
+    }        
     
 }
 
 void CClientAggregator::onVersionReceived ( const CHostAddress& inetAddr, COSUtil::EOpSystemType eOSType, const QString& version )
 {
+    QMutexLocker locker ( &m_dataMutex );
     // qDebug() << "ClientAggregator: Received version from" << inetAddr.toString() << "- Version:" << version;
-    for ( auto& directory : m_directories )
+    if ( Server* server = getServerFromAnyDirectory( normalizedIpString(inetAddr.InetAddr), inetAddr.iPort ) )
     {
-        if ( Server* server = getServer ( directory.address, inetAddr.InetAddr.toString(), inetAddr.iPort ) )
-        {
-            const QDateTime now = QDateTime::currentDateTime();
-            server->version     = version;
-            server->os          = COSUtil::GetOperatingSystemString ( eOSType );
-            server->lastModified   = now;
-            directory.lastModified = now;
-            break;
-        }
+        const QDateTime now = QDateTime::currentDateTime();
+        server->version     = version;
+        server->os          = COSUtil::GetOperatingSystemString ( eOSType );
+        server->lastModified   = now;
+        // directory.lastModified = now; // Update removed from here as server is now retrieved from helper function.
     }
 }
 
 void CClientAggregator::onConnClientsListMesReceived ( const CHostAddress& inetAddr, const CVector<CChannelInfo>& vecChanInfo )
 {
+    QMutexLocker locker ( &m_dataMutex );
     // qDebug() << "ClientAggregator: Received client list from" << inetAddr.toString() << "with" << vecChanInfo.Size() << "clients.";
 
-    for ( auto& directory : m_directories )
+    if ( Server* server = getServerFromAnyDirectory( normalizedIpString(inetAddr.InetAddr), inetAddr.iPort ) )
     {
-        if ( Server* server = getServer ( directory.address, normalizedIpString(inetAddr.InetAddr), inetAddr.iPort ) )
+        const QDateTime now = QDateTime::currentDateTime();
+        server->clients.clear();
+
+        for ( const auto& chanInfo : vecChanInfo )
         {
-            const QDateTime now = QDateTime::currentDateTime();
-            server->clients.clear();
-
-            for ( const auto& chanInfo : vecChanInfo )
-            {
-                Client newClient;
-                newClient.chanid       = chanInfo.iChanID;
-                newClient.country      = QLocale::countryToString ( chanInfo.eCountry );
-                newClient.country_code = countryToCode(chanInfo.eCountry);
-                newClient.instrument   = CInstPictures::GetName ( chanInfo.iInstrument );
-                newClient.skill        = skillLevelToString ( chanInfo.eSkillLevel );
-                newClient.skillid      = static_cast<int> ( chanInfo.eSkillLevel );
-                newClient.countryid    = static_cast<int> ( chanInfo.eCountry );
-                newClient.instrumentid = chanInfo.iInstrument;
-                newClient.name         = chanInfo.strName;
-                newClient.city         = chanInfo.strCity;
-                newClient.lastModified = now;
-                server->clients.append ( newClient );
-            }
-
-            // Sort clients by chanid
-            std::sort(server->clients.begin(), server->clients.end(), [](const Client& a, const Client& b) {
-                return a.chanid < b.chanid;
-            });
-
-            server->lastClientListReceived = now; // Update the timestamp when client list was received
-            server->lastModified   = now;
-            directory.lastModified = now;
-            break; // Assume server is in one directory only
+            Client newClient;
+            newClient.chanid       = chanInfo.iChanID;
+            newClient.country      = QLocale::countryToString ( chanInfo.eCountry );
+            newClient.country_code = countryToCode(chanInfo.eCountry);
+            newClient.instrument   = CInstPictures::GetName ( chanInfo.iInstrument );
+            newClient.skill        = skillLevelToString ( chanInfo.eSkillLevel );
+            newClient.skillid      = static_cast<int> ( chanInfo.eSkillLevel );
+            newClient.countryid    = static_cast<int> ( chanInfo.eCountry );
+            newClient.instrumentid = chanInfo.iInstrument;
+            newClient.name         = chanInfo.strName;
+            newClient.city         = chanInfo.strCity;
+            newClient.lastModified = now;
+            server->clients.append ( newClient );
         }
-        else
-        {
-            qWarning() << "ClientAggregator: Received client list from unknown server" << inetAddr.toString();
-        }
+
+        // Sort clients by chanid
+        std::sort(server->clients.begin(), server->clients.end(), [](const Client& a, const Client& b) {
+            return a.chanid < b.chanid;
+        });
+
+        server->lastClientListReceived = now; // Update the timestamp when client list was received
+        server->lastModified   = now;
+        // directory.lastModified = now; // Update removed from here as server is now retrieved from helper function.
+    }
+    else
+    {
+        qWarning() << "ClientAggregator: Received client list from unknown server" << inetAddr.toString();
     }
 }
 
 void CClientAggregator::addDirectory ( const QString& address )
 {
+    QMutexLocker locker ( &m_dataMutex );
     if ( !m_directories.contains ( address ) )
     {
         m_directories.insert ( address, { address, {}, QDateTime::currentDateTime(), QDateTime() } );
     }
 }
 
-void CClientAggregator::removeDirectory ( const QString& address ) { m_directories.remove ( address ); }
+void CClientAggregator::removeDirectory ( const QString& address )
+{
+    QMutexLocker locker ( &m_dataMutex );
+    m_directories.remove ( address );
+}
 
 Directory* CClientAggregator::getDirectory ( const QString& address )
 {
@@ -459,6 +455,13 @@ Directory* CClientAggregator::getDirectory ( const QString& address )
 
 void CClientAggregator::updateOrAddServer ( const QString& directoryAddress, const Server& server )
 {
+    QMutexLocker locker ( &m_dataMutex );
+    updateOrAddServerLocked( directoryAddress, server );
+}
+
+void CClientAggregator::updateOrAddServerLocked ( const QString& directoryAddress, const Server& server )
+{
+    // Called with m_dataMutex already locked
     if ( Directory* dir = getDirectory ( directoryAddress ) )
     {
         auto it =
@@ -500,6 +503,7 @@ void CClientAggregator::updateOrAddServer ( const QString& directoryAddress, con
 
 bool CClientAggregator::removeServer ( const QString& directoryAddress, const QString& serverIp, quint16 port )
 {
+    QMutexLocker locker ( &m_dataMutex );
     if ( Directory* dir = getDirectory ( directoryAddress ) )
     {
         auto it = std::remove_if ( dir->servers.begin(), dir->servers.end(), [&] ( const Server& s ) { return s.ip == serverIp && s.port == port; } );
@@ -526,8 +530,22 @@ Server* CClientAggregator::getServer ( const QString& directoryAddress, const QS
     return nullptr;
 }
 
+Server* CClientAggregator::getServerFromAnyDirectory(const QString& serverIp, quint16 port)
+{
+    for ( auto& directory : m_directories )
+    {
+        if ( Server* server = getServer ( directory.address, serverIp, port ) )
+        {
+            return server;
+        }
+    }
+    qWarning() << "ClientAggregator: Server not found in any directory for IP:" << serverIp << "Port:" << port;
+    return nullptr;
+}
+
 void CClientAggregator::updateOrAddClient ( const QString& directoryAddress, const QString& serverIp, quint16 port, const Client& client )
 {
+    QMutexLocker locker ( &m_dataMutex );
     if ( Server* server = getServer ( directoryAddress, serverIp, port ) )
     {
         auto it = std::find_if ( server->clients.begin(), server->clients.end(), [&] ( const Client& c ) { return c.chanid == client.chanid; } );
@@ -550,6 +568,7 @@ void CClientAggregator::updateOrAddClient ( const QString& directoryAddress, con
 
 bool CClientAggregator::removeClient ( const QString& directoryAddress, const QString& serverIp, quint16 port, int chanId )
 {
+    QMutexLocker locker ( &m_dataMutex );
     if ( Server* server = getServer ( directoryAddress, serverIp, port ) )
     {
         auto it = std::remove_if ( server->clients.begin(), server->clients.end(), [=] ( const Client& c ) { return c.chanid == chanId; } );
@@ -565,6 +584,7 @@ bool CClientAggregator::removeClient ( const QString& directoryAddress, const QS
 
 Client* CClientAggregator::getClient ( const QString& directoryAddress, const QString& serverIp, quint16 port, int chanId )
 {
+    QMutexLocker locker ( &m_dataMutex );
     if ( Server* server = getServer ( directoryAddress, serverIp, port ) )
     {
         auto it = std::find_if ( server->clients.begin(), server->clients.end(), [=] ( const Client& c ) { return c.chanid == chanId; } );
@@ -578,7 +598,14 @@ Client* CClientAggregator::getClient ( const QString& directoryAddress, const QS
 
 QByteArray CClientAggregator::getJson() const
 {
-    QMutexLocker locker ( &m_cacheMutex );
+    QMutexLocker lockerData ( &m_dataMutex );
+    QMutexLocker lockerCache ( &m_cacheMutex );
+    return getJsonLocked();
+}
+
+QByteArray CClientAggregator::getJsonLocked() const
+{
+    // Called with both m_dataMutex and m_cacheMutex already locked
     QJsonObject topLevelObject;
     QJsonArray directoriesArray;
     QJsonArray serversArray;
@@ -617,7 +644,8 @@ QByteArray CClientAggregator::getJson() const
 
 QByteArray CClientAggregator::getCompressedJson ( QByteArray& etag )
 {
-    QMutexLocker locker ( &m_cacheMutex );
+    QMutexLocker lockerData ( &m_dataMutex );
+    QMutexLocker lockerCache ( &m_cacheMutex );
 
     QDateTime mostRecentChange;
     for ( const auto& directory : m_directories )
@@ -630,7 +658,8 @@ QByteArray CClientAggregator::getCompressedJson ( QByteArray& etag )
 
     if ( mostRecentChange > m_cacheTimestamp )
     {
-        QByteArray raw = getJson();
+        // Use the internal version that doesn't require additional locks
+        QByteArray raw = getJsonLocked();
         m_jsonCache      = qCompress ( raw, 9 );
         m_cacheTimestamp = mostRecentChange;
         m_etag           = QCryptographicHash::hash ( raw, QCryptographicHash::Sha1 ).toHex();

@@ -143,8 +143,10 @@ public:
 
     // CRUD for Servers
     void    updateOrAddServer ( const QString& directoryAddress, const Server& server );
+    void    updateOrAddServerLocked ( const QString& directoryAddress, const Server& server ); // Internal: called with mutex locked
     bool    removeServer ( const QString& directoryAddress, const QString& serverIp, quint16 port );
     Server* getServer ( const QString& directoryAddress, const QString& serverIp, quint16 port );
+    Server* getServerFromAnyDirectory(const QString& serverIp, quint16 port);
 
     // CRUD for Clients
     void    updateOrAddClient ( const QString& directoryAddress, const QString& serverIp, quint16 port, const Client& client );
@@ -153,6 +155,7 @@ public:
 
     // Serialization
     QByteArray getJson() const;
+    QByteArray getJsonLocked() const;  // Internal: called with both mutexes already locked
     QByteArray getCompressedJson(QByteArray& etag);
 
 
@@ -181,6 +184,7 @@ private:
     QThread*                 m_httpServerThread{};
     bool                     m_detailedJson;
 
+    mutable QRecursiveMutex m_dataMutex;      // Protects m_directories
     mutable QRecursiveMutex m_cacheMutex;
     mutable QByteArray m_jsonCache;
     mutable QDateTime m_cacheTimestamp;
