@@ -1,4 +1,4 @@
-#include "clientaggregator.h"
+﻿#include "clientaggregator.h"
 #include "connectionlesssocket.h"
 #include "util.h"
 #include <QDebug>
@@ -118,9 +118,10 @@ CClientAggregator::CClientAggregator ( const QStringList& directoryAddresses, bo
 
     // Initialize geolocation service
     m_geoLocation = std::make_unique<CGeoLocation>(this);
-    m_geoLocation->setRefreshIntervalMinutes(5);     // Refresh cache every 5 minutes
+    m_geoLocation->setRefreshIntervalMinutes(60*24);     // Refresh cache every day
+    m_geoLocation->setCacheJitterSeconds ( 60 * 60 );
     m_geoLocation->setMaxBatchSize(20);              // Max 20 IPs per batch
-    m_geoLocation->setRequestTimeoutMs(5000);        // 5 second timeout
+    m_geoLocation->setRequestTimeoutMs(10000);        // 10 second timeout
     m_geoLocation->setEnableGeoLocation(true);       // Enabled by default
 
     connect ( &m_updateTimer, &QTimer::timeout, this, &CClientAggregator::onUpdateTimer );
@@ -336,12 +337,30 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
     dir->lastModified = now;
 
     // Collect all server IPs that need geolocation
+    // Also apply cached geolocation data if available
     QStringList ipsToQuery;
-    for (const auto& server : dir->servers)
+    const QDateTime now2 = QDateTime::currentDateTime();
+    for (auto& server : dir->servers)
     {
         if (!server.geo_valid)
         {
-            ipsToQuery.append(server.ip);
+            // Try to get cached geolocation data first
+            GeoLocationData cachedGeo = m_geoLocation->getGeoLocation(server.ip);
+            if (cachedGeo.is_valid)
+            {
+                // Apply cached geolocation data
+                server.geo_latitude = cachedGeo.latitude;
+                server.geo_longitude = cachedGeo.longitude;
+                server.geo_valid = true;
+                server.lastModified = now2;
+                //qDebug() << "ClientAggregator: Applied cached geolocation for" << server.ip
+                //         << "lat:" << cachedGeo.latitude << "lon:" << cachedGeo.longitude;
+            }
+            else
+            {
+                // Only query if we don't have valid data from cache
+                ipsToQuery.append(server.ip);
+            }
         }
     }
 
@@ -351,7 +370,7 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
     // Query geolocation for servers without valid geo data
     if (!ipsToQuery.isEmpty())
     {
-        qDebug() << "ClientAggregator: Querying geolocation for" << ipsToQuery.size() << "servers";
+        //qDebug() << "ClientAggregator: Querying geolocation for" << ipsToQuery.size() << "servers";
         m_geoLocation->getGeoLocations(ipsToQuery);
     }
 }
@@ -1063,6 +1082,12 @@ void CClientAggregator::onGeoLocationReady(const QString& ip, const GeoLocationD
         return;
     }
 
+    // Epsilon value for comparing floating-point coordinates
+    // 0.0001 degrees ≈ 11 meters at the equator (sufficient precision)
+    static constexpr double COORD_EPSILON = 0.0001;
+
+    bool anyServerUpdated = false;
+
     // Find and update all servers with this IP
     for (auto& directory : m_directories)
     {
@@ -1070,14 +1095,29 @@ void CClientAggregator::onGeoLocationReady(const QString& ip, const GeoLocationD
         {
             if (server.ip == ip)
             {
-                server.geo_latitude = geoData.latitude;
-                server.geo_longitude = geoData.longitude;
-                server.geo_valid = true;
-                server.lastModified = QDateTime::currentDateTime();
-                directory.lastModified = QDateTime::currentDateTime();
-                qDebug() << "ClientAggregator: Updated geolocation for" << ip 
-                         << "lat:" << geoData.latitude << "lon:" << geoData.longitude;
+                // Only update if coordinates actually changed (using epsilon comparison)
+                bool latChanged = std::abs(server.geo_latitude - geoData.latitude) > COORD_EPSILON;
+                bool lonChanged = std::abs(server.geo_longitude - geoData.longitude) > COORD_EPSILON;
+                bool validityChanged = (server.geo_valid != true);
+
+                if (latChanged || lonChanged || validityChanged)
+                {
+                    server.geo_latitude = geoData.latitude;
+                    server.geo_longitude = geoData.longitude;
+                    server.geo_valid = true;
+                    server.lastModified = QDateTime::currentDateTime();
+                    anyServerUpdated = true;
+
+                    qDebug() << "ClientAggregator: Updated geolocation for" << ip
+                             << "lat:" << geoData.latitude << "lon:" << geoData.longitude;
+                }
             }
+        }
+
+        // Only update directory timestamp if we actually changed server data
+        if (anyServerUpdated)
+        {
+            directory.lastModified = QDateTime::currentDateTime();
         }
     }
 }

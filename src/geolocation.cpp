@@ -33,6 +33,9 @@
 #include <QMutexLocker>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QFile>
+#include <QIODevice>
+#include <random>
 
 CGeoLocation::CGeoLocation(QObject* parent)
     : QObject(parent),
@@ -48,11 +51,16 @@ CGeoLocation::CGeoLocation(QObject* parent)
     m_batch_timer.setSingleShot(true);
     connect(&m_batch_timer, &QTimer::timeout, this, &CGeoLocation::processPendingRequests);
 
+    // Load persistent cache from disk
+    loadCacheFromDisk();
+
     qInfo() << "CGeoLocation: Initialized with default settings";
 }
 
 CGeoLocation::~CGeoLocation()
 {
+    // Save cache to disk before destroying
+    saveCacheToDisk();
     clearCache();
     qInfo() << "CGeoLocation: Destroyed";
 }
@@ -92,6 +100,19 @@ void CGeoLocation::setEnableGeoLocation(bool enabled)
     qInfo() << "CGeoLocation:" << (enabled ? "Enabled" : "Disabled");
 }
 
+void CGeoLocation::setCacheJitterSeconds(int jitter_seconds)
+{
+    if (jitter_seconds >= 0)
+    {
+        m_cache_jitter_seconds = jitter_seconds;
+        qInfo() << "CGeoLocation: Cache jitter set to" << jitter_seconds << "seconds";
+    }
+    else
+    {
+        qWarning() << "CGeoLocation: Invalid jitter value" << jitter_seconds << "(must be >= 0)";
+    }
+}
+
 GeoLocationData CGeoLocation::getGeoLocation(const QString& ip_address)
 {
     if (!m_enable_geolocation)
@@ -108,7 +129,7 @@ GeoLocationData CGeoLocation::getGeoLocation(const QString& ip_address)
         auto it = m_cache.find(ip_address);
         if (it != m_cache.end() && !it.value().data.isExpired(m_cache_ttl_seconds))
         {
-            qDebug() << "CGeoLocation: Cache hit for" << ip_address;
+            //qDebug() << "CGeoLocation: Cache hit for" << ip_address;
             return it.value().data;
         }
     }
@@ -152,7 +173,7 @@ QList<GeoLocationData> CGeoLocation::getGeoLocations(const QStringList& ip_addre
             if (it != m_cache.end() && !it.value().data.isExpired(m_cache_ttl_seconds))
             {
                 results.append(it.value().data);
-                qDebug() << "CGeoLocation: Cache hit for" << ip;
+                //qDebug() << "CGeoLocation: Cache hit for" << ip;
             }
             else
             {
@@ -402,15 +423,36 @@ void CGeoLocation::onNetworkReply()
                 CacheEntry entry;
                 entry.data = geo_data;
                 entry.cached_at = now;
+                
+                // Apply jitter to distribute cache expirations
+                if (m_cache_jitter_seconds > 0)
+                {
+                    std::random_device rd;
+                    std::mt19937 gen(rd() ^ std::random_device{}());
+                    std::uniform_int_distribution<> dis(0, m_cache_jitter_seconds);
+                    int jitter = dis(gen);
+                    entry.data.ttl_seconds = m_cache_ttl_seconds + jitter;
+                    qDebug() << "CGeoLocation: Cached" << geo_data.ip
+                            << "with jitter +" << jitter << "seconds (total TTL:" << entry.data.ttl_seconds << "s)";
+                }
+                else
+                {
+                    entry.data.ttl_seconds = m_cache_ttl_seconds;
+                    qDebug() << "CGeoLocation: Cached" << geo_data.ip
+                            << "at" << geo_data.latitude << "," << geo_data.longitude;
+                }
+                
                 m_cache[geo_data.ip] = entry;
-
-                qDebug() << "CGeoLocation: Cached" << geo_data.ip
-                        << "at" << geo_data.latitude << "," << geo_data.longitude;
             }
             
             // Emit signal for each result
             emit geoLocationReady(geo_data.ip, geo_data);
         }
+        
+        // Save updated cache to disk
+        locker.unlock();
+        saveCacheToDisk();
+        locker.relock();
     }
 
     // Emit batch signal if results available
@@ -496,4 +538,99 @@ void CGeoLocation::updateRateLimitInfo(const QNetworkReply* reply)
         m_rate_limit.reset_timestamp = QDateTime::currentDateTime().addSecs(ttl);
         qDebug() << "CGeoLocation: Rate limit - reset in" << ttl << "seconds";
     }
+}
+
+void CGeoLocation::loadCacheFromDisk()
+{
+    QMutexLocker locker(&m_cache_mutex);
+    
+    QFile file(CACHE_FILE_PATH);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        qDebug() << "CGeoLocation: No persistent cache file found at" << CACHE_FILE_PATH;
+        return;
+    }
+
+    QByteArray data = file.readAll();
+    file.close();
+
+    QJsonDocument doc = QJsonDocument::fromJson(data);
+    if (!doc.isObject())
+    {
+        qWarning() << "CGeoLocation: Invalid cache file format";
+        return;
+    }
+
+    QJsonObject obj = doc.object();
+    int loaded_count = 0;
+
+    for (auto it = obj.constBegin(); it != obj.constEnd(); ++it)
+    {
+        QString ip = it.key();
+        QJsonObject entry = it.value().toObject();
+
+        GeoLocationData geo_data;
+        geo_data.ip = ip;
+        geo_data.latitude = entry.value("lat").toDouble();
+        geo_data.longitude = entry.value("lon").toDouble();
+        geo_data.is_valid = entry.value("valid").toBool();
+        
+        // Load per-entry TTL if it exists
+        QJsonValue ttl_value = entry.value("ttl");
+        geo_data.ttl_seconds = ttl_value.isUndefined() ? 0 : ttl_value.toInt();
+        
+        QString cached_at_str = entry.value("cached_at").toString();
+        geo_data.cached_at = QDateTime::fromString(cached_at_str, Qt::ISODate);
+
+        // Check if cached entry is still valid
+        if (!geo_data.isExpired(m_cache_ttl_seconds))
+        {
+            CacheEntry cache_entry;
+            cache_entry.data = geo_data;
+            cache_entry.cached_at = geo_data.cached_at;
+            m_cache[ip] = cache_entry;
+            loaded_count++;
+        }
+    }
+
+    qInfo() << "CGeoLocation: Loaded" << loaded_count << "valid entries from persistent cache";
+}
+
+void CGeoLocation::saveCacheToDisk() const
+{
+    QMutexLocker locker(&m_cache_mutex);
+    
+    QJsonObject obj;
+
+    for (auto it = m_cache.constBegin(); it != m_cache.constEnd(); ++it)
+    {
+        const QString& ip = it.key();
+        const CacheEntry& entry = it.value();
+        const GeoLocationData& geo_data = entry.data;
+
+        QJsonObject geo_obj;
+        geo_obj["lat"] = geo_data.latitude;
+        geo_obj["lon"] = geo_data.longitude;
+        geo_obj["valid"] = geo_data.is_valid;
+        geo_obj["cached_at"] = geo_data.cached_at.toString(Qt::ISODate);
+        if (geo_data.ttl_seconds > 0)
+        {
+            geo_obj["ttl"] = geo_data.ttl_seconds;  // Save per-entry TTL
+        }
+
+        obj[ip] = geo_obj;
+    }
+
+    QJsonDocument doc(obj);
+    QFile file(CACHE_FILE_PATH);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+    {
+        qWarning() << "CGeoLocation: Failed to open cache file for writing:" << CACHE_FILE_PATH;
+        return;
+    }
+
+    file.write(doc.toJson());
+    file.close();
+
+    qDebug() << "CGeoLocation: Saved" << m_cache.size() << "entries to persistent cache";
 }

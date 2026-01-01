@@ -42,6 +42,7 @@ struct GeoLocationData
     double    longitude{0.0};
     bool      is_valid{false};
     QDateTime cached_at;
+    int       ttl_seconds{0};  // Individual TTL for this entry (includes jitter)
 
     bool isExpired(int cache_ttl_seconds) const
     {
@@ -49,7 +50,9 @@ struct GeoLocationData
             return true;
         if (!cached_at.isValid())
             return true;
-        return cached_at.msecsTo(QDateTime::currentDateTime()) > (cache_ttl_seconds * 1000);
+        // Use entry-specific TTL if set, otherwise use default
+        int effective_ttl = (ttl_seconds > 0) ? ttl_seconds : cache_ttl_seconds;
+        return cached_at.msecsTo(QDateTime::currentDateTime()) > (effective_ttl * 1000);
     }
 };
 
@@ -76,6 +79,7 @@ public:
     void setMaxBatchSize(int size);
     void setRequestTimeoutMs(int timeout);
     void setEnableGeoLocation(bool enabled);
+    void setCacheJitterSeconds(int jitter_seconds);  // Set random jitter for cache expiration
 
     // Query geolocation for a single IP (cached if available)
     GeoLocationData getGeoLocation(const QString& ip_address);
@@ -128,6 +132,7 @@ private:
     int  m_request_timeout_ms{5000};         // 5 second timeout
     bool m_enable_geolocation{true};         // Enable/disable feature
     int  m_target_requests_per_minute{12};   // Stay well below the 15/min limit
+    int  m_cache_jitter_seconds{0};          // Random jitter added to each entry (0 = disabled)
 
     // Cache management
     QMap<QString, CacheEntry>   m_cache;
@@ -148,6 +153,11 @@ private:
     // Constants
     static constexpr const char* IP_API_BATCH_URL = "http://ip-api.com/batch";
     static constexpr int         RATE_LIMIT_WINDOW_MS = 60000;  // 1 minute
-    static constexpr int         MIN_INTERVAL_BETWEEN_REQUESTS_MS = 1000;  // Min 1 second between batch requests
+    static constexpr int         MIN_INTERVAL_BETWEEN_REQUESTS_MS = 3000;  // Min 3 seconds between batch requests
     static constexpr int         MAX_CONCURRENT_REQUESTS = 1;    // Max 1 concurrent request (free tier limit)
+    static constexpr const char* CACHE_FILE_PATH = "geolocation_cache.json";  // Cache file
+
+private:
+    void loadCacheFromDisk();    // Load cache from persistent storage
+    void saveCacheToDisk() const; // Save cache to persistent storage
 };
