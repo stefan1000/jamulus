@@ -389,6 +389,7 @@ HEADERS += src/plugins/audioreverb.h \
     src/channel.h \
     src/clientaggregator.h \
 	src/connectionlesssocket.h \
+	src/geolocation.h \
     src/global.h \
     src/protocol.h \
     src/recorder/jamcontroller.h \
@@ -498,6 +499,7 @@ SOURCES += src/plugins/audioreverb.cpp \
     src/buffer.cpp \
     src/channel.cpp \
     src/clientaggregator.cpp \
+	src/geolocation.cpp \
 	src/connectionlesssocket.cpp \
     src/main.cpp \
     src/protocol.cpp \

@@ -39,6 +39,8 @@
 #include "global.h"
 #include "protocol.h"
 #include "util.h"
+#include "geolocation.h"
+#include <memory>
 
 class CConnectionlessSocket;
 
@@ -90,6 +92,9 @@ struct Server
     int           lastNumClients{};        // Store the last reported number of clients
     QDateTime     lastClientListFetch; // Timestamp of the last client list fetch
     QDateTime     lastClientListReceived; // Timestamp when the client list was last received
+    double        geo_latitude{0.0};   // Geolocation latitude
+    double        geo_longitude{0.0};  // Geolocation longitude
+    bool          geo_valid{false};    // Whether geolocation data is valid
 
     QJsonObject toJson(bool detailed) const;
 };
@@ -206,6 +211,7 @@ private slots:
     void onPingTimeReceived ( const CHostAddress& inetAddr, int iPingTime, int iNumClients );
     void onVersionReceived ( const CHostAddress& inetAddr, COSUtil::EOpSystemType eOSType, const QString& version );
     void onConnClientsListMesReceived ( const CHostAddress& inetAddr, const CVector<CChannelInfo>& vecChanInfo );
+    void onGeoLocationReady ( const QString& ip, const GeoLocationData& geoData );
 
 private:
     void queryDirectories();
@@ -219,6 +225,7 @@ private:
     CJamStatusServer*        m_httpServer{};
     QThread*                 m_httpServerThread{};
     bool                     m_detailedJson;
+    std::unique_ptr<CGeoLocation> m_geoLocation;  // IP geolocation service
 
     mutable QRecursiveMutex m_dataMutex;      // Protects m_directories
     mutable QRecursiveMutex m_cacheMutex;

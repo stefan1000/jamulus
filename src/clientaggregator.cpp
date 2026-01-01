@@ -72,6 +72,16 @@ QJsonObject Server::toJson(bool detailed) const
     obj["ip"]          = ip;
     obj["nclients"]    = nclients;
     obj["lastClientListReceived"] = lastClientListReceived.isValid() ? lastClientListReceived.toString ( Qt::ISODate ) : QString();
+    
+    // Add geolocation if available
+    if (geo_valid)
+    {
+        QJsonArray geoArray;
+        geoArray.append(geo_longitude);
+        geoArray.append(geo_latitude);
+        obj["geo"] = geoArray;
+    }
+    
     if (detailed) {
         obj["numip"]       = static_cast<qint64> ( numip );
         obj["countryid"]   = countryid;
@@ -106,6 +116,13 @@ CClientAggregator::CClientAggregator ( const QStringList& directoryAddresses, bo
     }
     qInfo() << "ClientAggregator: Initialized with directories:" << directoryAddresses;
 
+    // Initialize geolocation service
+    m_geoLocation = std::make_unique<CGeoLocation>(this);
+    m_geoLocation->setRefreshIntervalMinutes(5);     // Refresh cache every 5 minutes
+    m_geoLocation->setMaxBatchSize(20);              // Max 20 IPs per batch
+    m_geoLocation->setRequestTimeoutMs(5000);        // 5 second timeout
+    m_geoLocation->setEnableGeoLocation(true);       // Enabled by default
+
     connect ( &m_updateTimer, &QTimer::timeout, this, &CClientAggregator::onUpdateTimer );
 
     // Protocol -> this
@@ -119,6 +136,9 @@ CClientAggregator::CClientAggregator ( const QStringList& directoryAddresses, bo
 
     // Socket -> Protocol
     connect ( m_pSocket, &CConnectionlessSocket::CLMessageReceived, &m_protocol, &CProtocol::ParseConnectionLessMessageBody );
+
+    // Geolocation -> this
+    connect ( m_geoLocation.get(), &CGeoLocation::geoLocationReady, this, &CClientAggregator::onGeoLocationReady );
 }
 
 CClientAggregator::~CClientAggregator()
@@ -288,6 +308,7 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
             newServer.maxclients   = serverInfo.iMaxNumClients;
             newServer.perm         = serverInfo.bPermanentOnline;
             newServer.lastModified = now;
+
             //qDebug() << "ClientAggregator: Adding new server:" << newServer.name << "@" << serverId;
             updateOrAddServerLocked ( dir->address, newServer );
         }
@@ -313,6 +334,26 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
             }),
         dir->servers.end());
     dir->lastModified = now;
+
+    // Collect all server IPs that need geolocation
+    QStringList ipsToQuery;
+    for (const auto& server : dir->servers)
+    {
+        if (!server.geo_valid)
+        {
+            ipsToQuery.append(server.ip);
+        }
+    }
+
+    // Release the mutex before making async network requests
+    locker.unlock();
+
+    // Query geolocation for servers without valid geo data
+    if (!ipsToQuery.isEmpty())
+    {
+        qDebug() << "ClientAggregator: Querying geolocation for" << ipsToQuery.size() << "servers";
+        m_geoLocation->getGeoLocations(ipsToQuery);
+    }
 }
 
 void CClientAggregator::onPingTimeReceived ( const CHostAddress& inetAddr, int iPingTime, int iNumClients )
@@ -1010,4 +1051,33 @@ void CJamStatusServer::processCompleteRequest ( QTcpSocket* socket, const QByteA
     // HEAD method: headers already sent, no body sent
 
     socket->close();
+}
+
+void CClientAggregator::onGeoLocationReady(const QString& ip, const GeoLocationData& geoData)
+{
+    QMutexLocker locker(&m_dataMutex);
+    
+    if (!geoData.is_valid)
+    {
+        qDebug() << "ClientAggregator: Geolocation query failed for" << ip;
+        return;
+    }
+
+    // Find and update all servers with this IP
+    for (auto& directory : m_directories)
+    {
+        for (auto& server : directory.servers)
+        {
+            if (server.ip == ip)
+            {
+                server.geo_latitude = geoData.latitude;
+                server.geo_longitude = geoData.longitude;
+                server.geo_valid = true;
+                server.lastModified = QDateTime::currentDateTime();
+                directory.lastModified = QDateTime::currentDateTime();
+                qDebug() << "ClientAggregator: Updated geolocation for" << ip 
+                         << "lat:" << geoData.latitude << "lon:" << geoData.longitude;
+            }
+        }
+    }
 }
