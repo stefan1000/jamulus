@@ -4,9 +4,63 @@
 #include <QDebug>
 #include <QCryptographicHash>
 #include <algorithm> // Required for std::sort
+#include <QFile>
+#include <QTextStream>
+#include <QDateTime>
 
 namespace
 {
+    // Global file for logging
+    QFile* g_pLogFile = nullptr;
+    QTextStream* g_pLogStream = nullptr;
+    QtMessageHandler g_pPreviousMessageHandler = nullptr;
+    QtMsgType g_logLevelMask = QtDebugMsg;
+
+    // Custom message handler for file logging
+    void CustomMessageHandler(QtMsgType type, const QMessageLogContext& context, const QString& msg)
+    {
+        Q_UNUSED(context);  // Not used in this implementation
+        
+        QString logMessage;
+        
+        // Format the log message with timestamp and level
+        switch (type)
+        {
+            case QtDebugMsg:
+                logMessage = QString("[%1] DEBUG: %2")
+                    .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz"))
+                    .arg(msg);
+                break;
+            case QtInfoMsg:
+                logMessage = QString("[%1] INFO: %2")
+                    .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz"))
+                    .arg(msg);
+                break;
+            case QtWarningMsg:
+                logMessage = QString("[%1] WARNING: %2")
+                    .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz"))
+                    .arg(msg);
+                break;
+            case QtCriticalMsg:
+                logMessage = QString("[%1] CRITICAL: %2")
+                    .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz"))
+                    .arg(msg);
+                break;
+            case QtFatalMsg:
+                logMessage = QString("[%1] FATAL: %2")
+                    .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz"))
+                    .arg(msg);
+                break;
+        }
+
+        // Write to file if available
+        if (g_pLogStream)
+        {
+            *g_pLogStream << logMessage << "\n";
+            g_pLogStream->flush();
+        }
+    }
+
     QString skillLevelToString ( ESkillLevel level )
     {
         switch ( level )
@@ -107,19 +161,48 @@ QJsonObject Server::toJson(bool detailed) const
     return obj;
 }
 
-CClientAggregator::CClientAggregator ( const QStringList& directoryAddresses, bool detailedJson, QObject* parent )
+CClientAggregator::CClientAggregator ( const QStringList& directoryAddresses, 
+                                       bool detailedJson, 
+                                       const QString& strLoggingFileName,
+                                       QtMsgType logLevelMask,
+                                       QObject* parent )
     : QObject ( parent ), m_protocol(), m_pSocket( new CConnectionlessSocket( this ) ), m_httpServer ( nullptr ), m_httpServerThread ( nullptr ), m_detailedJson(detailedJson)
 {
+    // Setup logging if requested
+    if (!strLoggingFileName.isEmpty())
+    {
+        g_logLevelMask = logLevelMask;
+        
+        // Open log file
+        g_pLogFile = new QFile(strLoggingFileName);
+        if (g_pLogFile->open(QIODevice::Append | QIODevice::Text))
+        {
+            g_pLogStream = new QTextStream(g_pLogFile);
+            
+            // Install our custom message handler (saves previous one)
+            g_pPreviousMessageHandler = qInstallMessageHandler(CustomMessageHandler);
+            
+            qInfo() << "ClientAggregator: Logging enabled to file:" << strLoggingFileName;
+        }
+        else
+        {
+            qWarning() << "ClientAggregator: Could not open log file:" << strLoggingFileName;
+            delete g_pLogFile;
+            g_pLogFile = nullptr;
+        }
+    }
+
     for ( const auto& address : directoryAddresses )
     {
         addDirectory ( address );
     }
+
     qInfo() << "ClientAggregator: Initialized with directories:" << directoryAddresses;
 
     // Initialize geolocation service
     m_geoLocation = std::make_unique<CGeoLocation>(this);
     m_geoLocation->setRefreshIntervalMinutes(60*24);     // Refresh cache every day
-    m_geoLocation->setCacheJitterSeconds ( 60 * 60 );
+    m_geoLocation->setCacheJitterSeconds ( 60 * 60 * 4);
     m_geoLocation->setMaxBatchSize(20);              // Max 20 IPs per batch
     m_geoLocation->setRequestTimeoutMs(10000);        // 10 second timeout
     m_geoLocation->setEnableGeoLocation(true);       // Enabled by default
@@ -144,6 +227,28 @@ CClientAggregator::CClientAggregator ( const QStringList& directoryAddresses, bo
 
 CClientAggregator::~CClientAggregator()
 {
+    // Cleanup logging
+    if (g_pLogStream)
+    {
+        *g_pLogStream << QString("[%1] ClientAggregator: Shutting down")
+            .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz")) << "\n";
+        g_pLogStream->flush();
+        
+        // Restore previous message handler
+        qInstallMessageHandler(g_pPreviousMessageHandler);
+        g_pPreviousMessageHandler = nullptr;
+        
+        delete g_pLogStream;
+        g_pLogStream = nullptr;
+    }
+    
+    if (g_pLogFile)
+    {
+        g_pLogFile->close();
+        delete g_pLogFile;
+        g_pLogFile = nullptr;
+    }
+
     if ( m_httpServerThread )
     {
         m_httpServerThread->quit();
@@ -154,8 +259,8 @@ CClientAggregator::~CClientAggregator()
 
 void CClientAggregator::start()
 {
-    // Start protocol with random port
-    if ( !m_pSocket->Start ( 0, true ) // use port 0 for random, enable IPv6
+    // 
+    if ( !m_pSocket->Start ( 22131, true ) // use port 0 for random, enable IPv6
     )
     {
         qCritical() << "ClientAggregator: Socket could not start.";
@@ -231,8 +336,10 @@ void CClientAggregator::cleanupExpiredServers()
 {
     QMutexLocker locker ( &m_dataMutex );
     const QDateTime now = QDateTime::currentDateTime();
+    
     for ( auto& directory : m_directories )
     {
+        // First pass: hard-remove hard-expired servers (no ping for AGGREGATOR_SERVER_TIMEOUT_MS)
         directory.servers.erase ( std::remove_if ( directory.servers.begin(),
                                                    directory.servers.end(),
                                                    [&] ( const Server& server ) {
@@ -240,7 +347,41 @@ void CClientAggregator::cleanupExpiredServers()
                                                               server.lastPingResponse.msecsTo ( now ) > AGGREGATOR_SERVER_TIMEOUT_MS;
                                                    } ),
                                   directory.servers.end() );
-        directory.lastModified = now;
+        
+        // Second pass: hard-remove soft-removed servers that have accumulated enough missed pings
+        directory.servers.erase ( std::remove_if ( directory.servers.begin(),
+                                                   directory.servers.end(),
+                                                   [&] ( Server& server ) {
+                                                       // If server is soft-removed and hasn't received a ping recently
+                                                       if ( !server.inDirectoryList )
+                                                       {
+                                                           // Check if we should increment missed ping counter
+                                                           // This happens on cleanup interval (every 15 seconds)
+                                                           // We're being soft about removal - servers can come back
+                                                           server.missedPingCount++;
+                                                           
+                                                           qDebug() << "ClientAggregator: Soft-removed server has been offline for"
+                                                                    << (server.missedPingCount * 15) << "seconds:" 
+                                                                    << server.ip << ":" << server.port
+                                                                    << "(" << server.name << ")"
+                                                                    << "- missed" << server.missedPingCount << "pings";
+                                                           
+                                                           // Hard-remove after N missed pings
+                                                           if ( server.missedPingCount >= static_cast<int>(AGGREGATOR_SERVER_SOFT_REMOVAL_PINGS) )
+                                                           {
+                                                               qInfo() << "ClientAggregator: Hard-removing server after"
+                                                                       << AGGREGATOR_SERVER_SOFT_REMOVAL_PINGS << "missed pings:"
+                                                                       << server.ip << ":" << server.port
+                                                                       << "(" << server.name << ")";
+                                                               return true;  // Remove this server
+                                                           }
+                                                       }
+                                                       return false;  // Keep server
+                                                   } ),
+                                  directory.servers.end() );
+        
+        // Only update lastModified if we actually removed servers
+        // (the erase operation modifies the list)
     }
 }
 
@@ -273,7 +414,9 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
 
     const QDateTime now       = QDateTime::currentDateTime();
     dir->lastSuccessfulUpdate = now;
-    dir->lastModified         = now;
+    
+    // Track whether any actual changes occurred
+    bool hasChanges = false;
 
     QSet<QString> receivedServers;
 
@@ -296,6 +439,7 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
         Server* existingServer = getServer ( dir->address, serverIp, serverPort );
         if ( !existingServer )
         {
+            // New server added
             Server newServer;
             newServer.ip           = serverIp;
             newServer.port         = serverPort;
@@ -312,21 +456,40 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
 
             //qDebug() << "ClientAggregator: Adding new server:" << newServer.name << "@" << serverId;
             updateOrAddServerLocked ( dir->address, newServer );
+            hasChanges = true;
         }
         else
         {
-            // Update existing server info if needed
-            existingServer->name         = serverInfo.strName;
-            existingServer->city         = serverInfo.strCity;
-            existingServer->country      = QLocale::countryToString ( serverInfo.eCountry );
-            existingServer->country_code = countryToCode(serverInfo.eCountry);
-            existingServer->countryid    = static_cast<int> ( serverInfo.eCountry );
-            existingServer->maxclients   = serverInfo.iMaxNumClients;
-            existingServer->perm         = serverInfo.bPermanentOnline;
-            existingServer->lastModified = now;
+            // Check if any fields actually changed for existing server
+            bool fieldsChanged = false;
+            if ( existingServer->name != serverInfo.strName ||
+                 existingServer->city != serverInfo.strCity ||
+                 existingServer->country != QLocale::countryToString ( serverInfo.eCountry ) ||
+                 existingServer->countryid != static_cast<int> ( serverInfo.eCountry ) ||
+                 existingServer->maxclients != serverInfo.iMaxNumClients ||
+                 existingServer->perm != serverInfo.bPermanentOnline )
+            {
+                fieldsChanged = true;
+            }
+
+            if ( fieldsChanged )
+            {
+                // Update existing server info
+                existingServer->name         = serverInfo.strName;
+                existingServer->city         = serverInfo.strCity;
+                existingServer->country      = QLocale::countryToString ( serverInfo.eCountry );
+                existingServer->country_code = countryToCode(serverInfo.eCountry);
+                existingServer->countryid    = static_cast<int> ( serverInfo.eCountry );
+                existingServer->maxclients   = serverInfo.iMaxNumClients;
+                existingServer->perm         = serverInfo.bPermanentOnline;
+                existingServer->lastModified = now;
+                hasChanges = true;
+            }
         }
     }
 
+    // Check if any servers were removed
+    size_t oldServerCount = dir->servers.size();
     dir->servers.erase(
         std::remove_if(dir->servers.begin(), dir->servers.end(),
             [&](const Server& server) {
@@ -334,7 +497,46 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
                 return !receivedServers.contains(serverId);
             }),
         dir->servers.end());
-    dir->lastModified = now;
+    
+    if ( dir->servers.size() != oldServerCount )
+    {
+        hasChanges = true;
+    }
+
+    // Only update directory lastModified if there were actual changes
+    if ( hasChanges )
+    {
+        dir->lastModified = now;
+    }
+
+    // Mark servers not in received list as soft-removed (but keep them)
+    // They'll be hard-removed after N missed pings
+    for (auto& server : dir->servers)
+    {
+        QString serverId = server.ip + ":" + QString::number(server.port);
+        if (!receivedServers.contains(serverId))
+        {
+            // Server no longer in directory list, mark as soft-removed
+            if (server.inDirectoryList)
+            {
+                server.inDirectoryList = false;
+                server.missedPingCount = 0;  // Reset counter
+                qDebug() << "ClientAggregator: Server soft-removed from directory:" << server.ip << ":" << server.port
+                         << "(" << server.name << ") - will wait for" << AGGREGATOR_SERVER_SOFT_REMOVAL_PINGS << "failed pings";
+            }
+        }
+        else
+        {
+            // Server is back in directory list, restore it
+            if (!server.inDirectoryList)
+            {
+                server.inDirectoryList = true;
+                server.missedPingCount = 0;
+                qDebug() << "ClientAggregator: Server restored to directory:" << server.ip << ":" << server.port
+                         << "(" << server.name << ")";
+            }
+        }
+    }
 
     // Collect all server IPs that need geolocation
     // Also apply cached geolocation data if available
@@ -386,6 +588,9 @@ void CClientAggregator::onPingTimeReceived ( const CHostAddress& inetAddr, int i
         const QDateTime now = QDateTime::currentDateTime();
         server->ping        = iPingTime;
         server->nclients    = iNumClients; // Update nclients directly from ping response
+        
+        // Reset missed ping counter on successful ping
+        server->missedPingCount = 0;
 
         bool shouldRequestClientList = false;
 
@@ -433,8 +638,15 @@ void CClientAggregator::onPingTimeReceived ( const CHostAddress& inetAddr, int i
         server->lastModified     = now;
         // directory.lastModified = now; // Update removed from here as server is now retrieved from helper function.
 
-    }        
-    
+    }
+    else
+    {
+        // Server not found - this is now less of an issue since we soft-remove servers
+        // But still log it as it helps track directory consistency
+        QString serverKey = normalizedIpString(inetAddr.InetAddr) + ":" + QString::number(inetAddr.iPort);
+        qDebug() << "ClientAggregator: Ping received from unknown server" << serverKey
+                 << "(may be pending soft removal after missed pings)";
+    }
 }
 
 void CClientAggregator::onVersionReceived ( const CHostAddress& inetAddr, COSUtil::EOpSystemType eOSType, const QString& version )
@@ -1086,11 +1298,11 @@ void CClientAggregator::onGeoLocationReady(const QString& ip, const GeoLocationD
     // 0.0001 degrees ≈ 11 meters at the equator (sufficient precision)
     static constexpr double COORD_EPSILON = 0.0001;
 
-    bool anyServerUpdated = false;
-
     // Find and update all servers with this IP
     for (auto& directory : m_directories)
     {
+        bool anyServerUpdated = false;
+
         for (auto& server : directory.servers)
         {
             if (server.ip == ip)

@@ -431,7 +431,7 @@ int main ( int argc, char** argv )
         }
 
         // Server mode flag ----------------------------------------------------
-        if ( GetFlagArgument ( argv, i, "-s", "--server" ) )
+        if ( GetFlagArgument ( argv, i, "-s" , "--server" ) )
         {
             bIsClient = false;
             qInfo() << "- server mode chosen";
@@ -959,7 +959,7 @@ int main ( int argc, char** argv )
 #endif
 
             const bool        detailedJson       = false;
-            CClientAggregator aggregator ( directoryAddresses, detailedJson, pApp );
+            CClientAggregator aggregator ( directoryAddresses, detailedJson, strLoggingFileName, QtDebugMsg, pApp );
             aggregator.start();
             aggregator.startHttpServer(iHttpPort);
             pApp->exec();

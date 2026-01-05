@@ -49,6 +49,7 @@ class CConnectionlessSocket;
 #define AGGREGATOR_UPDATE_CLIENTS_INTERVAL_MS   30000 // Interval to force re-fetching client list
 #define AGGREGATOR_SERVER_TIMEOUT_MS            30000 // Time after which a non-responding server is considered offline
 #define AGGREGATOR_DIRECTORY_TIMEOUT_MS         60000 // Time after which a non-responding directory is considered offline
+#define AGGREGATOR_SERVER_SOFT_REMOVAL_PINGS    4     // Number of failed pings before soft-removed servers are deleted
 
 /* Data Structures ************************************************************/
 struct Client
@@ -95,6 +96,10 @@ struct Server
     double        geo_latitude{0.0};   // Geolocation latitude
     double        geo_longitude{0.0};  // Geolocation longitude
     bool          geo_valid{false};    // Whether geolocation data is valid
+
+    // Soft removal tracking
+    bool          inDirectoryList{true};   // Whether server is currently in any directory list
+    int           missedPingCount{0};      // Counter for failed pings after removal from directory
 
     QJsonObject toJson(bool detailed) const;
 };
@@ -174,7 +179,11 @@ class CClientAggregator : public QObject
     Q_OBJECT
 
 public:
-    explicit CClientAggregator ( const QStringList& directoryAddresses, bool detailedJson = false, QObject* parent = nullptr );
+    explicit CClientAggregator ( const QStringList& directoryAddresses, 
+                                bool detailedJson = false,
+                                const QString& strLoggingFileName = "",
+                                QtMsgType logLevelMask = QtDebugMsg,
+                                QObject* parent = nullptr );
     ~CClientAggregator();
 
     // CRUD for Directories

@@ -270,7 +270,7 @@ void CGeoLocation::processGeoLocationBatch(const QStringList& ip_addresses)
     if (!canMakeRequest())
     {
         int wait_seconds = secondsUntilRateLimitReset();
-        qWarning() << "CGeoLocation: Rate limited. Wait" << wait_seconds << "seconds";
+        // qWarning() << "CGeoLocation: Rate limited. Wait" << wait_seconds << "seconds";
         emit rateLimitExceeded(wait_seconds);
         return;
     }
@@ -278,8 +278,16 @@ void CGeoLocation::processGeoLocationBatch(const QStringList& ip_addresses)
     // Queue batches instead of sending all at once
     int batch_count = (ip_addresses.size() + m_max_batch_size - 1) / m_max_batch_size;
     
+    bool should_start_processing = false;
     {
         QMutexLocker locker(&m_network_mutex);
+        
+        // Check if queue was empty and we have no active requests
+        if (m_request_queue.isEmpty() && m_active_requests == 0 && !m_batch_timer.isActive())
+        {
+            should_start_processing = true;
+        }
+        
         for (int batch_idx = 0; batch_idx < batch_count; ++batch_idx)
         {
             int start = batch_idx * m_max_batch_size;
@@ -289,16 +297,11 @@ void CGeoLocation::processGeoLocationBatch(const QStringList& ip_addresses)
         }
     }
 
-    // Send first batch(es) if we have capacity
-    processPendingRequests();
-
-    // Update rate limit - decrement once for the whole batch set
+    // Start processing if this is the first batch queued
+    // Rate limit decrement happens in processPendingRequests() when request is actually sent
+    if (should_start_processing)
     {
-        QMutexLocker locker(&m_rate_limit_mutex);
-        m_rate_limit.last_request_time = QDateTime::currentDateTime();
-        m_rate_limit.reset_timestamp = m_rate_limit.last_request_time.addSecs(60);
-        if (m_rate_limit.remaining_requests > 0)
-            m_rate_limit.remaining_requests--;
+        processPendingRequests();
     }
 }
 
@@ -312,9 +315,18 @@ void CGeoLocation::processPendingRequests()
         return;
     }
 
-    // Send one request if queue has items
+    // Send one request if queue has items AND we're not rate-limited
     if (!m_request_queue.isEmpty())
     {
+        // Check rate limit before sending
+        if (!canMakeRequest())
+        {
+            int wait_seconds = secondsUntilRateLimitReset();
+            qWarning() << "CGeoLocation: Cannot process pending requests - rate limited. Wait" << wait_seconds << "seconds";
+            emit rateLimitExceeded(wait_seconds);
+            return;
+        }
+
         QStringList batch = m_request_queue.dequeue();
         
         QByteArray body = createBatchRequest(batch);
@@ -354,6 +366,13 @@ void CGeoLocation::processPendingRequests()
 
             // Schedule next batch after minimum interval
             m_batch_timer.start(MIN_INTERVAL_BETWEEN_REQUESTS_MS);
+            
+            // Decrement rate limit counter AFTER successfully sending the request
+            {
+                QMutexLocker rl_locker(&m_rate_limit_mutex);
+                if (m_rate_limit.remaining_requests > 0)
+                    m_rate_limit.remaining_requests--;
+            }
         }
     }
 }
