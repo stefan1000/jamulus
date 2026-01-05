@@ -67,3 +67,4 @@ jamulus_plugin_import.cpp
 /build.bat
 .vs/
 /geolocation_cache.json
+/jamulus.log
