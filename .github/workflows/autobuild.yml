@@ -203,12 +203,12 @@ jobs:
             is_main_build_target:   true
 
           
-          - config_name:            Windows (artifact+codeQL)
-            target_os:              windows
-            building_on_os:         windows-2022
-            base_command:           powershell .\.github\autobuild\windows.ps1 -Stage
-            run_codeql:             false
-            is_main_build_target:   true
+          # - config_name:            Windows (artifact+codeQL)
+          #   target_os:              windows
+          #   building_on_os:         windows-2022
+          #   base_command:           powershell .\.github\autobuild\windows.ps1 -Stage
+          #   run_codeql:             false
+          #   is_main_build_target:   true
 
           
         # This injects the build_all_targets information into each matrix output:

@@ -80,6 +80,9 @@ setup_cross_compiler() {
 
 
 build_app_as_deb() {
+    # Add Qt6 qmake to PATH
+    export PATH="/usr/lib/${ABI_NAME}/qt6/bin:$PATH"
+
     TARGET_ARCH="${TARGET_ARCH}" ./linux/deploy_deb.sh
 }
 
