@@ -55,8 +55,8 @@ setup() {
     export APT_ARCH
 
     echo "Installing dependencies..."
-    sudo apt-get -qq update
-    sudo apt-get -qq --no-install-recommends -y install devscripts build-essential debhelper fakeroot libjack-jackd2-dev qt6-base-dev qt6-tools-dev qt6-tools-dev-tools qt6-multimedia-dev
+    apt-get -qq update
+    apt-get -qq --no-install-recommends -y install devscripts build-essential debhelper fakeroot libjack-jackd2-dev qt6-base-dev qt6-tools-dev qt6-tools-dev-tools qt6-multimedia-dev
 
     setup_cross_compiler
 }
@@ -66,15 +66,15 @@ setup_cross_compiler() {
         return
     fi
     local GCC_VERSION=13  # Default for Ubuntu 24.04; check with `apt search '^g++-[0-9]+-aarch64-linux-gnu'` if unsure
-    sudo apt install -qq -y --no-install-recommends "g++-${GCC_VERSION}-${ABI_NAME}" "qt6-base-dev:${TARGET_ARCH}" "qt6-tools-dev:${TARGET_ARCH}" "qt6-multimedia-dev:${TARGET_ARCH}" "libjack-jackd2-dev:${TARGET_ARCH}"
+    apt install -qq -y --no-install-recommends "g++-${GCC_VERSION}-${ABI_NAME}" "qt6-base-dev:${TARGET_ARCH}" "qt6-tools-dev:${TARGET_ARCH}" "qt6-multimedia-dev:${TARGET_ARCH}" "libjack-jackd2-dev:${TARGET_ARCH}"
 
-    sudo update-alternatives --install "/usr/bin/${ABI_NAME}-g++" g++ "/usr/bin/${ABI_NAME}-g++-${GCC_VERSION}" 10
-    sudo update-alternatives --install "/usr/bin/${ABI_NAME}-gcc" gcc "/usr/bin/${ABI_NAME}-gcc-${GCC_VERSION}" 10
+    update-alternatives --install "/usr/bin/${ABI_NAME}-g++" g++ "/usr/bin/${ABI_NAME}-g++-${GCC_VERSION}" 10
+    update-alternatives --install "/usr/bin/${ABI_NAME}-gcc" gcc "/usr/bin/${ABI_NAME}-gcc-${GCC_VERSION}" 10
 
     # Adjust mkspecs path for Qt6 if necessary
     if [[ $ABI_NAME ]]; then
-        sudo cp -R "/usr/lib/${ABI_NAME}/qt6/mkspecs/linux-arm-gnueabi-g++/" "/usr/lib/${ABI_NAME}/qt6/mkspecs/${ABI_NAME}-g++/"
-        sudo sed -re "s/arm-linux-gnueabi/${ABI_NAME}/" -i "/usr/lib/${ABI_NAME}/qt6/mkspecs/${ABI_NAME}-g++/qmake.conf"
+        cp -R "/usr/lib/${ABI_NAME}/qt6/mkspecs/linux-arm-gnueabi-g++/" "/usr/lib/${ABI_NAME}/qt6/mkspecs/${ABI_NAME}-g++/"
+        sed -re "s/arm-linux-gnueabi/${ABI_NAME}/" -i "/usr/lib/${ABI_NAME}/qt6/mkspecs/${ABI_NAME}-g++/qmake.conf"
     fi
 }
 
