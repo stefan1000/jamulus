@@ -54,8 +54,6 @@ setup() {
     APT_ARCH="$(dpkg --print-architecture)"
     export APT_ARCH
 
-    setup_cross_compilation_apt_sources
-
     echo "Installing dependencies..."
     sudo apt-get -qq update
     sudo apt-get -qq --no-install-recommends -y install devscripts build-essential debhelper fakeroot libjack-jackd2-dev qt6-base-dev qt6-tools-dev qt6-tools-dev-tools qt6-multimedia-dev
@@ -80,21 +78,6 @@ setup_cross_compiler() {
     fi
 }
 
-setup_cross_compiler() {
-    if [[ "${TARGET_ARCH}" == "${APT_ARCH}" ]]; then
-        return
-    fi
-    local GCC_VERSION=9  # 9 is the default on 20.04, there is no reason not to update once 20.04 is out of support
-    sudo apt install -qq -y --no-install-recommends "g++-${GCC_VERSION}-${ABI_NAME}" "qt5-qmake:${TARGET_ARCH}" "qtbase5-dev:${TARGET_ARCH}" "libjack-jackd2-dev:${TARGET_ARCH}" "qtmultimedia5-dev:${TARGET_ARCH}"
-    sudo update-alternatives --install "/usr/bin/${ABI_NAME}-g++" g++ "/usr/bin/${ABI_NAME}-g++-${GCC_VERSION}" 10
-    sudo update-alternatives --install "/usr/bin/${ABI_NAME}-gcc" gcc "/usr/bin/${ABI_NAME}-gcc-${GCC_VERSION}" 10
-
-    # Ubuntu's Qt version only ships a profile for gnueabi, but not for gnueabihf or aarch64. Therefore, build a custom one:
-    if [[ $ABI_NAME ]]; then
-        sudo cp -R "/usr/lib/${ABI_NAME}/qt5/mkspecs/linux-arm-gnueabi-g++/" "/usr/lib/${ABI_NAME}/qt5/mkspecs/${ABI_NAME}-g++/"
-        sudo sed -re "s/arm-linux-gnueabi/${ABI_NAME}/" -i "/usr/lib/${ABI_NAME}/qt5/mkspecs/${ABI_NAME}-g++/qmake.conf"
-    fi
-}
 
 build_app_as_deb() {
     TARGET_ARCH="${TARGET_ARCH}" ./linux/deploy_deb.sh
