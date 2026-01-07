@@ -56,32 +56,13 @@ setup() {
 
     echo "Installing dependencies..."
     apt-get -qq update
-    apt-get -qq --no-install-recommends -y install devscripts build-essential debhelper fakeroot libjack-jackd2-dev qt6-base-dev qt6-tools-dev qt6-tools-dev-tools qt6-multimedia-dev
-
-    setup_cross_compiler
-}
-
-setup_cross_compiler() {
-    if [[ "${TARGET_ARCH}" == "${APT_ARCH}" ]]; then
-        return
-    fi
-    local GCC_VERSION=13  # Default for Ubuntu 24.04; check with `apt search '^g++-[0-9]+-aarch64-linux-gnu'` if unsure
-    apt install -qq -y --no-install-recommends "g++-${GCC_VERSION}-${ABI_NAME}" "qt6-base-dev:${TARGET_ARCH}" "qt6-tools-dev:${TARGET_ARCH}" "qt6-multimedia-dev:${TARGET_ARCH}" "libjack-jackd2-dev:${TARGET_ARCH}"
-
-    update-alternatives --install "/usr/bin/${ABI_NAME}-g++" g++ "/usr/bin/${ABI_NAME}-g++-${GCC_VERSION}" 10
-    update-alternatives --install "/usr/bin/${ABI_NAME}-gcc" gcc "/usr/bin/${ABI_NAME}-gcc-${GCC_VERSION}" 10
-
-    # Adjust mkspecs path for Qt6 if necessary
-    if [[ $ABI_NAME ]]; then
-        cp -R "/usr/lib/${ABI_NAME}/qt6/mkspecs/linux-arm-gnueabi-g++/" "/usr/lib/${ABI_NAME}/qt6/mkspecs/${ABI_NAME}-g++/"
-        sed -re "s/arm-linux-gnueabi/${ABI_NAME}/" -i "/usr/lib/${ABI_NAME}/qt6/mkspecs/${ABI_NAME}-g++/qmake.conf"
-    fi
+    apt-get -qq --no-install-recommends -y install devscripts build-essential debhelper fakeroot libjack-jackd2-dev qt6-base-dev qt6-tools-dev-tools qt6-tools-dev qt6-tools-dev-tools qt6-multimedia-dev
 }
 
 
 build_app_as_deb() {
     # Add Qt6 qmake to PATH
-    export PATH="/usr/lib/${ABI_NAME}/qt6/bin:$PATH"
+    export PATH="/usr/lib/qt6/bin:$PATH"
 
     TARGET_ARCH="${TARGET_ARCH}" ./linux/deploy_deb.sh
 }
