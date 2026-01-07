@@ -267,6 +267,9 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
             newServer.perm         = serverInfo.bPermanentOnline;
             newServer.lastModified = now;
 
+            // Detect and set IP stack type
+            updateServerIPStackType(newServer, serverAddr.InetAddr);
+
             //qDebug() << "ClientAggregator: Adding new server:" << newServer.name << "@" << serverId;
             updateOrAddServerLocked ( dir->address, newServer );
             hasChanges = true;
@@ -401,6 +404,9 @@ void CClientAggregator::onPingTimeReceived ( const CHostAddress& inetAddr, int i
         const QDateTime now = QDateTime::currentDateTime();
         server->ping        = iPingTime;
         server->nclients    = iNumClients; // Update nclients directly from ping response
+        
+        // Update IP stack type based on ping response address
+        updateServerIPStackType(*server, inetAddr.InetAddr);
         
         // Reset missed ping counter on successful ping
         server->missedPingCount = 0;
@@ -850,8 +856,8 @@ void CClientAggregator::onGeoLocationReady(const QString& ip, const GeoLocationD
                     server.lastModified = QDateTime::currentDateTime();
                     anyServerUpdated = true;
 
-                    qDebug() << "ClientAggregator: Updated geolocation for" << ip
-                             << "lat:" << geoData.latitude << "lon:" << geoData.longitude;
+                    //qDebug() << "ClientAggregator: Updated geolocation for" << ip
+                    //         << "lat:" << geoData.latitude << "lon:" << geoData.longitude;
                 }
             }
         }
@@ -862,4 +868,69 @@ void CClientAggregator::onGeoLocationReady(const QString& ip, const GeoLocationD
             directory.lastModified = QDateTime::currentDateTime();
         }
     }
+}
+
+// Helper function to detect IPv4/IPv6 stack type from an address
+EIPStackType CClientAggregator::detectIPStackType(const QHostAddress& addr)
+{
+    if (addr.protocol() == QAbstractSocket::IPv6Protocol)
+    {
+        // Check if it's an IPv4-mapped IPv6 address
+        quint32 ipv4 = addr.toIPv4Address();
+        if (ipv4 != 0)
+        {
+            // It's an IPv4-mapped IPv6 address, treat as IPv4
+            return EIPStackType::IPV4_ONLY;
+        }
+        else
+        {
+            // Pure IPv6 address
+            return EIPStackType::IPV6_ONLY;
+        }
+    }
+    else if (addr.protocol() == QAbstractSocket::IPv4Protocol)
+    {
+        return EIPStackType::IPV4_ONLY;
+    }
+    
+    return EIPStackType::UNKNOWN;
+}
+
+// Update server's IP stack type based on newly received address
+void CClientAggregator::updateServerIPStackType(Server& server, const QHostAddress& addr)
+{
+    EIPStackType newType = detectIPStackType(addr);
+    
+    if (newType == EIPStackType::IPV4_ONLY)
+    {
+        server.reachableViaIPv4 = true;
+    }
+    else if (newType == EIPStackType::IPV6_ONLY)
+    {
+        server.reachableViaIPv6 = true;
+        // Store IPv6 address if different from main IP
+        QString ipv6Str = normalizedIpString(addr);
+        if (ipv6Str != server.ip)
+        {
+            server.ipv6Address = ipv6Str;
+        }
+    }
+    
+    // Update the overall stack type based on what we've detected so far
+    if (server.reachableViaIPv4 && server.reachableViaIPv6)
+    {
+        server.ipStackType = EIPStackType::DUAL_STACK;
+    }
+    else if (server.reachableViaIPv4)
+    {
+        server.ipStackType = EIPStackType::IPV4_ONLY;
+    }
+    else if (server.reachableViaIPv6)
+    {
+        server.ipStackType = EIPStackType::IPV6_ONLY;
+    }
+    
+    //qDebug() << "ClientAggregator: Updated IP stack type for" << server.ip 
+    //         << "- Type:" << static_cast<int>(server.ipStackType)
+    //         << "IPv4:" << server.reachableViaIPv4 << "IPv6:" << server.reachableViaIPv6;
 }

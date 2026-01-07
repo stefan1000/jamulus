@@ -70,6 +70,15 @@ struct Client
     QJsonObject toJson(bool detailed) const;
 };
 
+// IPv4/IPv6 stack support type
+enum class EIPStackType
+{
+    UNKNOWN      = 0,  // IP type not yet determined
+    IPV4_ONLY    = 1,  // Server is IPv4 only
+    IPV6_ONLY    = 2,  // Server is IPv6 only
+    DUAL_STACK   = 3   // Server supports both IPv4 and IPv6
+};
+
 struct Server
 {
     quint32       numip{};
@@ -101,6 +110,12 @@ struct Server
     // Soft removal tracking
     bool          inDirectoryList{true};   // Whether server is currently in any directory list
     int           missedPingCount{0};      // Counter for failed pings after removal from directory
+
+    // IPv4/IPv6 stack support tracking
+    EIPStackType  ipStackType{EIPStackType::UNKNOWN};  // IPv4-only, IPv6-only, or dual-stack
+    bool          reachableViaIPv4{false};            // Whether server is reachable via IPv4
+    bool          reachableViaIPv6{false};            // Whether server is reachable via IPv6
+    QString       ipv6Address;                         // IPv6 address if different from main IP
 
     QJsonObject toJson(bool detailed) const;
 };
@@ -207,6 +222,10 @@ private:
     mutable QRecursiveMutex m_dataMutex;      // Protects m_directories
     mutable QRecursiveMutex m_cacheMutex;
     mutable QMap<QString, JsonCacheData> m_jsonCaches;             // Cache per parameter set
+    
+    // Helper functions for IP stack detection
+    EIPStackType detectIPStackType(const QHostAddress& addr);
+    void updateServerIPStackType(Server& server, const QHostAddress& addr);
     
     static QString normalizedIpString(const QHostAddress& qhAddr);
 };

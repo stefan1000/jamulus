@@ -107,6 +107,7 @@ signals:
 
 private slots:
     void onNetworkReply();
+    void flushPendingBatch();  // Flush accumulated IPs into a batch
 
 private:
     struct CacheEntry
@@ -147,6 +148,8 @@ private:
     QMap<QNetworkReply*, QStringList>      m_pending_requests;  // Track which IPs belong to which request
     mutable QMutex                         m_network_mutex;
     QQueue<QStringList>                    m_request_queue;     // Queue pending batches
+    QStringList                            m_pending_batch_ips; // Accumulator for IPs to batch together
+    QTimer                                 m_accumulation_timer; // Timer to flush pending IPs into batch
     int                                    m_active_requests{0}; // Track active requests
     QTimer                                 m_batch_timer;      // Timer between batches
 

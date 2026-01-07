@@ -51,6 +51,10 @@ CGeoLocation::CGeoLocation(QObject* parent)
     m_batch_timer.setSingleShot(true);
     connect(&m_batch_timer, &QTimer::timeout, this, &CGeoLocation::processPendingRequests);
 
+    // Setup accumulation timer for collecting IPs into batches
+    m_accumulation_timer.setSingleShot(true);
+    connect(&m_accumulation_timer, &QTimer::timeout, this, &CGeoLocation::flushPendingBatch);
+
     // Load persistent cache from disk
     loadCacheFromDisk();
 
@@ -270,35 +274,89 @@ void CGeoLocation::processGeoLocationBatch(const QStringList& ip_addresses)
     if (!canMakeRequest())
     {
         int wait_seconds = secondsUntilRateLimitReset();
-        // qWarning() << "CGeoLocation: Rate limited. Wait" << wait_seconds << "seconds";
         emit rateLimitExceeded(wait_seconds);
         return;
     }
 
-    // Queue batches instead of sending all at once
-    int batch_count = (ip_addresses.size() + m_max_batch_size - 1) / m_max_batch_size;
+    bool should_restart_accumulation_timer = false;
     
-    bool should_start_processing = false;
     {
         QMutexLocker locker(&m_network_mutex);
         
-        // Check if queue was empty and we have no active requests
-        if (m_request_queue.isEmpty() && m_active_requests == 0 && !m_batch_timer.isActive())
+        // Add new IPs to the accumulation buffer, avoiding duplicates
+        for (const auto& ip : ip_addresses)
         {
-            should_start_processing = true;
+            if (!m_pending_batch_ips.contains(ip))
+            {
+                m_pending_batch_ips.append(ip);
+            }
         }
         
-        for (int batch_idx = 0; batch_idx < batch_count; ++batch_idx)
+        // If accumulation buffer now has a full batch, we can send immediately
+        // Otherwise, restart the accumulation timer to wait for more IPs
+        if (m_pending_batch_ips.size() >= m_max_batch_size)
         {
-            int start = batch_idx * m_max_batch_size;
-            int end = qMin(start + m_max_batch_size, ip_addresses.size());
-            QStringList batch = ip_addresses.mid(start, end - start);
-            m_request_queue.enqueue(batch);
+            // Batch is full, flush it immediately
+            should_restart_accumulation_timer = false;
+        }
+        else if (m_pending_batch_ips.size() == ip_addresses.size() && !m_accumulation_timer.isActive())
+        {
+            // This is a new accumulation, start the timer to allow more IPs to arrive
+            should_restart_accumulation_timer = true;
         }
     }
+    
+    if (should_restart_accumulation_timer)
+    {
+        // Wait a short time for more IPs to arrive before batching
+        // This allows multiple staggered requests to be combined
+        m_accumulation_timer.start(100);  // 100ms window for accumulation
+    }
+    else if (m_pending_batch_ips.size() >= m_max_batch_size)
+    {
+        // Batch is full, flush it now
+        flushPendingBatch();
+    }
+}
 
-    // Start processing if this is the first batch queued
-    // Rate limit decrement happens in processPendingRequests() when request is actually sent
+void CGeoLocation::flushPendingBatch()
+{
+    QMutexLocker locker(&m_network_mutex);
+    
+    // Stop the accumulation timer
+    m_accumulation_timer.stop();
+    
+    // Move all pending IPs into properly sized batches
+    while (!m_pending_batch_ips.isEmpty())
+    {
+        QStringList batch;
+        
+        // Take up to m_max_batch_size IPs from pending
+        int take_count = qMin(m_pending_batch_ips.size(), m_max_batch_size);
+        for (int i = 0; i < take_count; ++i)
+        {
+            batch.append(m_pending_batch_ips.takeFirst());
+        }
+        
+        m_request_queue.enqueue(batch);
+    }
+    
+    // If we have an empty queue, something went wrong
+    if (m_request_queue.isEmpty())
+    {
+        return;
+    }
+    
+    // Check if we should start processing
+    bool should_start_processing = false;
+    if (m_active_requests == 0 && !m_batch_timer.isActive())
+    {
+        should_start_processing = true;
+    }
+    
+    locker.unlock();
+    
+    // Start processing if needed
     if (should_start_processing)
     {
         processPendingRequests();
@@ -309,8 +367,8 @@ void CGeoLocation::processPendingRequests()
 {
     QMutexLocker locker(&m_network_mutex);
 
-    // If we have active requests or timer is running, wait
-    if (m_active_requests > 0 || m_batch_timer.isActive())
+    // If we have active requests, wait
+    if (m_active_requests > 0)
     {
         return;
     }
@@ -322,8 +380,13 @@ void CGeoLocation::processPendingRequests()
         if (!canMakeRequest())
         {
             int wait_seconds = secondsUntilRateLimitReset();
-            qWarning() << "CGeoLocation: Cannot process pending requests - rate limited. Wait" << wait_seconds << "seconds";
+            qWarning() << "CGeoLocation: Cannot process pending requests - rate limited. Wait" << wait_seconds << "seconds"
+                       << "(" << m_request_queue.size() << "batches remaining)";
             emit rateLimitExceeded(wait_seconds);
+            
+            // Schedule retry after rate limit resets
+            locker.unlock();
+            QTimer::singleShot(wait_seconds * 1000 + 1000, this, &CGeoLocation::processPendingRequests);
             return;
         }
 
@@ -343,7 +406,7 @@ void CGeoLocation::processPendingRequests()
         req.setHeader(QNetworkRequest::UserAgentHeader, QVariant("Jamulus/1.0"));
 
         qDebug() << "CGeoLocation: Sending batch request for" << batch.size() << "IPs" 
-                 << "(queued:" << m_request_queue.size() << ")";
+                 << "(remaining queued batches:" << m_request_queue.size() << ")";
 
         QNetworkReply* pReply = m_network_manager->post(req, body);
 
@@ -355,23 +418,46 @@ void CGeoLocation::processPendingRequests()
             // Connect the reply's finished signal to our handler
             connect(pReply, &QNetworkReply::finished, this, &CGeoLocation::onNetworkReply);
 
-            // Set timeout
+            // Set timeout using pReply's deleteLater() as cleanup
             QTimer::singleShot(m_request_timeout_ms, pReply, [pReply, this]() {
                 if (pReply && pReply->isRunning())
                 {
-                    qWarning() << "CGeoLocation: Request timeout for batch";
+                    qWarning() << "CGeoLocation: Request timeout, aborting...";
                     pReply->abort();
                 }
             });
-
-            // Schedule next batch after minimum interval
-            m_batch_timer.start(MIN_INTERVAL_BETWEEN_REQUESTS_MS);
             
             // Decrement rate limit counter AFTER successfully sending the request
             {
                 QMutexLocker rl_locker(&m_rate_limit_mutex);
                 if (m_rate_limit.remaining_requests > 0)
                     m_rate_limit.remaining_requests--;
+            }
+
+            // Schedule next batch processing - use API-provided rate limit info
+            if (!m_request_queue.isEmpty())
+            {
+                int next_delay_ms = MIN_INTERVAL_BETWEEN_REQUESTS_MS;
+                
+                {
+                    QMutexLocker rl_locker(&m_rate_limit_mutex);
+                    
+                    // If remaining requests are low, wait for the API's reset window
+                    if (m_rate_limit.remaining_requests <= 3)
+                    {
+                        // Use the X-Ttl value from the API response
+                        int reset_seconds = m_rate_limit.reset_time_seconds;
+                        if (reset_seconds > 0)
+                        {
+                            next_delay_ms = (reset_seconds + 2) * 1000;  // Add 2 second buffer
+                            qWarning() << "CGeoLocation: Rate limit getting low (" << m_rate_limit.remaining_requests 
+                                       << "remaining). Waiting" << reset_seconds << "seconds for API reset.";
+                        }
+                    }
+                }
+                
+                locker.unlock();
+                QTimer::singleShot(next_delay_ms, this, &CGeoLocation::processPendingRequests);
             }
         }
     }
@@ -409,10 +495,19 @@ void CGeoLocation::onNetworkReply()
             query_ips = it.value();
             m_pending_requests.erase(it);
         }
+        else
+        {
+            // This reply wasn't tracked - possibly timed out. Just clean up and return.
+            qWarning() << "CGeoLocation: Received reply for untracked request (may have timed out)";
+            reply->deleteLater();
+            m_active_requests--;
+            QTimer::singleShot(MIN_INTERVAL_BETWEEN_REQUESTS_MS, this, &CGeoLocation::processPendingRequests);
+            return;
+        }
         m_active_requests--;
     }
 
-    // Update rate limit info from response headers
+    // Update rate limit info from response headers FIRST
     updateRateLimitInfo(reply);
 
     if (reply->error() != QNetworkReply::NoError)
@@ -421,8 +516,18 @@ void CGeoLocation::onNetworkReply()
         emit errorOccurred(reply->errorString());
         reply->deleteLater();
         
-        // Process next pending request
-        processPendingRequests();
+        // Schedule processing next pending request - respect API rate limit
+        int next_delay_ms = MIN_INTERVAL_BETWEEN_REQUESTS_MS;
+        {
+            QMutexLocker rl_locker(&m_rate_limit_mutex);
+            if (m_rate_limit.remaining_requests <= 3 && m_rate_limit.reset_time_seconds > 0)
+            {
+                next_delay_ms = (m_rate_limit.reset_time_seconds + 2) * 1000;
+                qWarning() << "CGeoLocation: After error, rate limit info - remaining:" 
+                           << m_rate_limit.remaining_requests << "reset in:" << m_rate_limit.reset_time_seconds << "seconds";
+            }
+        }
+        QTimer::singleShot(next_delay_ms, this, &CGeoLocation::processPendingRequests);
         return;
     }
 
@@ -451,14 +556,14 @@ void CGeoLocation::onNetworkReply()
                     std::uniform_int_distribution<> dis(0, m_cache_jitter_seconds);
                     int jitter = dis(gen);
                     entry.data.ttl_seconds = m_cache_ttl_seconds + jitter;
-                    qDebug() << "CGeoLocation: Cached" << geo_data.ip
-                            << "with jitter +" << jitter << "seconds (total TTL:" << entry.data.ttl_seconds << "s)";
+                    //qDebug() << "CGeoLocation: Cached" << geo_data.ip
+                    //        << "with jitter +" << jitter << "seconds (total TTL:" << entry.data.ttl_seconds << "s)";
                 }
                 else
                 {
                     entry.data.ttl_seconds = m_cache_ttl_seconds;
-                    qDebug() << "CGeoLocation: Cached" << geo_data.ip
-                            << "at" << geo_data.latitude << "," << geo_data.longitude;
+                    //qDebug() << "CGeoLocation: Cached" << geo_data.ip
+                    //        << "at" << geo_data.latitude << "," << geo_data.longitude;
                 }
                 
                 m_cache[geo_data.ip] = entry;
@@ -471,7 +576,6 @@ void CGeoLocation::onNetworkReply()
         // Save updated cache to disk
         locker.unlock();
         saveCacheToDisk();
-        locker.relock();
     }
 
     // Emit batch signal if results available
@@ -482,8 +586,18 @@ void CGeoLocation::onNetworkReply()
 
     reply->deleteLater();
 
-    // Process next pending request
-    processPendingRequests();
+    // Schedule processing next pending request - respect API rate limit
+    int next_delay_ms = MIN_INTERVAL_BETWEEN_REQUESTS_MS;
+    {
+        QMutexLocker rl_locker(&m_rate_limit_mutex);
+        if (m_rate_limit.remaining_requests <= 3 && m_rate_limit.reset_time_seconds > 0)
+        {
+            next_delay_ms = (m_rate_limit.reset_time_seconds + 2) * 1000;
+            qDebug() << "CGeoLocation: After response, rate limit - remaining:" 
+                     << m_rate_limit.remaining_requests << "reset in:" << m_rate_limit.reset_time_seconds << "seconds";
+        }
+    }
+    QTimer::singleShot(next_delay_ms, this, &CGeoLocation::processPendingRequests);
 }
 
 void CGeoLocation::parseJsonResponse(const QByteArray& response, QList<GeoLocationData>& results)
@@ -530,8 +644,8 @@ void CGeoLocation::parseJsonResponse(const QByteArray& response, QList<GeoLocati
 
         results.append(geo_data);
 
-        qDebug() << "CGeoLocation: Parsed" << geo_data.ip
-                << "at" << geo_data.latitude << "," << geo_data.longitude;
+        //qDebug() << "CGeoLocation: Parsed" << geo_data.ip
+        //        << "at" << geo_data.latitude << "," << geo_data.longitude;
     }
 }
 
@@ -543,10 +657,13 @@ void CGeoLocation::updateRateLimitInfo(const QNetworkReply* reply)
     QVariant x_rl = reply->header(QNetworkRequest::KnownHeaders(QNetworkRequest::UserAgentHeader)); // Fallback
     bool ok;
     int remaining = reply->rawHeader("X-Rl").toInt(&ok);
+    QString  debug1    = "";
     if (ok && remaining >= 0)
     {
         m_rate_limit.remaining_requests = remaining;
-        qDebug() << "CGeoLocation: Rate limit - remaining requests:" << remaining;
+        debug1                          = QString ( "remaining requests %1 " ).arg ( remaining );
+
+        
     }
 
     // Check X-Ttl header (seconds until reset)
@@ -555,7 +672,13 @@ void CGeoLocation::updateRateLimitInfo(const QNetworkReply* reply)
     {
         m_rate_limit.reset_time_seconds = ttl;
         m_rate_limit.reset_timestamp = QDateTime::currentDateTime().addSecs(ttl);
-        qDebug() << "CGeoLocation: Rate limit - reset in" << ttl << "seconds";
+        debug1 += QString ( "reset in %1 seconds " ).arg ( ttl );
+        
+    }
+
+    if (!debug1.isEmpty())
+    {
+        qDebug() << "CGeoLocation: Rate limit " << debug1;
     }
 }
 

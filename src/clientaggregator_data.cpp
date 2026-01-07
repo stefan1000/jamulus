@@ -71,6 +71,19 @@ QJsonObject Server::toJson ( bool detailed ) const
         obj["geo"] = geoArray;
     }
 
+    // Add IPv4/IPv6 stack type information (available in non-detailed path)
+    {
+        QJsonObject stackObj;
+        stackObj["type"] = static_cast<int>(ipStackType);
+        stackObj["ipv4"] = reachableViaIPv4;
+        stackObj["ipv6"] = reachableViaIPv6;
+        if (!ipv6Address.isEmpty())
+        {
+            stackObj["ipv6_address"] = ipv6Address;
+        }
+        obj["ip_stack"] = stackObj;
+    }
+
     if ( detailed )
     {
         obj["numip"]       = static_cast<qint64> ( numip );
