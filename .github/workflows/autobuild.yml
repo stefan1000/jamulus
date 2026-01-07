@@ -196,8 +196,8 @@ jobs:
           
           - config_name:            Linux .deb amd64 (artifacts+codeQL)
             target_os:              linux
-            building_on_os:         ubuntu-22.04
-            building_container:     ubuntu:20.04
+            building_on_os:         ubuntu-24.04
+            building_container:     ubuntu:24.04
             base_command:           ./.github/autobuild/linux_deb.sh
             run_codeql:             false
             is_main_build_target:   true

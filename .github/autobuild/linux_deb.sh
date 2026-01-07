@@ -58,23 +58,25 @@ setup() {
 
     echo "Installing dependencies..."
     sudo apt-get -qq update
-    sudo apt-get -qq --no-install-recommends -y install devscripts build-essential debhelper fakeroot libjack-jackd2-dev qtbase5-dev qttools5-dev-tools qtmultimedia5-dev
+    sudo apt-get -qq --no-install-recommends -y install devscripts build-essential debhelper fakeroot libjack-jackd2-dev qt6-base-dev qt6-tools-dev qt6-tools-dev-tools qt6-multimedia-dev
 
     setup_cross_compiler
 }
 
-setup_cross_compilation_apt_sources() {
+setup_cross_compiler() {
     if [[ "${TARGET_ARCH}" == "${APT_ARCH}" ]]; then
         return
     fi
-    echo "Building on ${APT_ARCH} for ${TARGET_ARCH}. Thus modifying apt..."
-    sudo dpkg --add-architecture "${TARGET_ARCH}"
+    local GCC_VERSION=13  # Default for Ubuntu 24.04; check with `apt search '^g++-[0-9]+-aarch64-linux-gnu'` if unsure
+    sudo apt install -qq -y --no-install-recommends "g++-${GCC_VERSION}-${ABI_NAME}" "qt6-base-dev:${TARGET_ARCH}" "qt6-tools-dev:${TARGET_ARCH}" "qt6-multimedia-dev:${TARGET_ARCH}" "libjack-jackd2-dev:${TARGET_ARCH}"
 
-    if [[ "${APT_ARCH}" == "amd64"  ]]; then
-        # Duplicate the original Ubuntu sources and modify them to refer to the TARGET_ARCH:
-        sed -rne "s|^deb.*/ ([^ -]+(-updates)?) main.*|deb [arch=${TARGET_ARCH}] http://ports.ubuntu.com/ubuntu-ports \1 main universe multiverse restricted|p" /etc/apt/sources.list | sudo dd of=/etc/apt/sources.list.d/"${TARGET_ARCH}".list
-        # Now take the original Ubuntu sources and limit those to the build host (i.e. non-TARGET_ARCH) architectures:
-        sudo sed -re 's/^deb /deb [arch=amd64,i386] /' -i /etc/apt/sources.list
+    sudo update-alternatives --install "/usr/bin/${ABI_NAME}-g++" g++ "/usr/bin/${ABI_NAME}-g++-${GCC_VERSION}" 10
+    sudo update-alternatives --install "/usr/bin/${ABI_NAME}-gcc" gcc "/usr/bin/${ABI_NAME}-gcc-${GCC_VERSION}" 10
+
+    # Adjust mkspecs path for Qt6 if necessary
+    if [[ $ABI_NAME ]]; then
+        sudo cp -R "/usr/lib/${ABI_NAME}/qt6/mkspecs/linux-arm-gnueabi-g++/" "/usr/lib/${ABI_NAME}/qt6/mkspecs/${ABI_NAME}-g++/"
+        sudo sed -re "s/arm-linux-gnueabi/${ABI_NAME}/" -i "/usr/lib/${ABI_NAME}/qt6/mkspecs/${ABI_NAME}-g++/qmake.conf"
     fi
 }
 
