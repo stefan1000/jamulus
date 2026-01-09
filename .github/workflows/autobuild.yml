@@ -76,7 +76,8 @@ jobs:
     steps:
       - name:                       Checkout code
         uses:                       actions/checkout@v4
-       - name:                       Determine release version, type and prerelease variables
+
+      - name:                       Determine release version, type and prerelease variables
         run:                        ./.github/autobuild/get_build_vars.py
         id:                         get-build-vars
 
@@ -177,7 +178,7 @@ jobs:
           echo 'default case, not building all targets'
           build_all_targets 'false'
 
-
+            
   release_assets:
     name:                           Build for ${{ matrix.config.config_name }}
     needs:                          create_release
@@ -195,8 +196,8 @@ jobs:
           
           - config_name:            Linux .deb amd64 (artifacts+codeQL)
             target_os:              linux
-            building_on_os:         ubuntu-22.04
-            building_container:     ubuntu:22.04
+            building_on_os:         ubuntu-24.04
+            building_container:     ubuntu:24.04
             base_command:           ./.github/autobuild/linux_deb.sh
             run_codeql:             false
             is_main_build_target:   true
