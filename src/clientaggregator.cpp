@@ -104,6 +104,7 @@ void CClientAggregator::onUpdateTimer()
     queryDirectories();
     queryServers();
     cleanupExpiredServers();
+    cleanupClientLocationCache();
 }
 
 void CClientAggregator::queryDirectories()
@@ -490,8 +491,9 @@ void CClientAggregator::onConnClientsListMesReceived ( const CHostAddress& inetA
     if ( Server* server = getServerFromAnyDirectory( normalizedIpString(inetAddr.InetAddr), inetAddr.iPort ) )
     {
         const QDateTime now = QDateTime::currentDateTime();
-        server->clients.clear();
-
+        
+        // Build list of new clients before clearing
+        QList<Client> newClients;
         for ( const auto& chanInfo : vecChanInfo )
         {
             Client newClient;
@@ -506,7 +508,18 @@ void CClientAggregator::onConnClientsListMesReceived ( const CHostAddress& inetA
             newClient.name         = chanInfo.strName;
             newClient.city         = chanInfo.strCity;
             newClient.lastModified = now;
-            server->clients.append ( newClient );
+            newClients.append ( newClient );
+        }
+
+        // Check for clients that moved from other servers and trigger refetch
+        QString serverIp = normalizedIpString(inetAddr.InetAddr);
+        quint16 serverPort = inetAddr.iPort;
+        checkAndRequestRefetchForMovedClients(serverIp, serverPort, newClients);
+
+        server->clients.clear();
+        for (const auto& client : newClients)
+        {
+            server->clients.append(client);
         }
 
         // Sort clients by chanid
@@ -933,4 +946,158 @@ void CClientAggregator::updateServerIPStackType(Server& server, const QHostAddre
     //qDebug() << "ClientAggregator: Updated IP stack type for" << server.ip 
     //         << "- Type:" << static_cast<int>(server.ipStackType)
     //         << "IPv4:" << server.reachableViaIPv4 << "IPv6:" << server.reachableViaIPv6;
+}
+
+QString CClientAggregator::generateClientKey(const Client& client) const
+{
+    // Generate a unique key for a client based on name, countryid, and skillid
+    return client.name + ":" + QString::number(client.countryid) + ":" + QString::number(client.skillid);
+}
+
+void CClientAggregator::checkAndRequestRefetchForMovedClients(const QString& serverIp, quint16 serverPort, const QList<Client>& newClients)
+{
+    // Called with m_dataMutex already locked
+    // This method:
+    // 1. Detects clients that moved from other servers
+    // 2. Collects servers that need refetch (deduped)
+    // 3. Updates the active server map for all clients
+    // 4. Requests refetch for moved servers (once per server)
+    
+    QSet<QString> serversNeedingRefetch;  // Deduplicated set of servers to refetch: "ip:port"
+    
+    // First pass: Check for moved clients and collect servers to refetch
+    for (const auto& client : newClients)
+    {
+        QString clientKey = generateClientKey(client);
+        auto it = m_clientActiveOnServerMap.find(clientKey);
+        
+        if (it != m_clientActiveOnServerMap.end())
+        {
+            const ClientLocation& previousLocation = it.value();
+            // Check if client moved from a different server
+            if (previousLocation.serverIp != serverIp || previousLocation.serverPort != serverPort)
+            {
+                qInfo() << "ClientAggregator: Client moved from" << previousLocation.serverIp << ":" << previousLocation.serverPort
+                        << "to" << serverIp << ":" << serverPort << "- Client:" << client.name;
+                
+                // Mark the previous server for refetch
+                QString prevServerId = previousLocation.serverIp + ":" + QString::number(previousLocation.serverPort);
+                serversNeedingRefetch.insert(prevServerId);
+            }
+        }
+        
+        // Update the active location for this client
+        ClientLocation newLocation;
+        newLocation.serverIp = serverIp;
+        newLocation.serverPort = serverPort;
+        newLocation.lastSeen = QDateTime::currentDateTime();
+        m_clientActiveOnServerMap[clientKey] = newLocation;
+    }
+    
+    // Second pass: Request refetch for servers with moved clients (each server once)
+    for (const QString& serverId : serversNeedingRefetch)
+    {
+        // Parse serverId back to IP and port
+        int colonPos = serverId.lastIndexOf(":");
+        if (colonPos > 0)
+        {
+            QString previousServerIp = serverId.left(colonPos);
+            quint16 previousServerPort = serverId.mid(colonPos + 1).toUShort();
+            
+            if (Server* previousServer = getServerFromAnyDirectory(previousServerIp, previousServerPort))
+            {
+                // Request a refetch by requesting the connected clients list
+                CHostAddress previousServerAddr;
+                if (NetworkUtil().ParseNetworkAddress(serverId, previousServerAddr, true))
+                {
+                    qDebug() << "ClientAggregator: Requesting client list refetch for server"
+                             << serverId << "to verify client removal";
+                    m_protocol.CreateCLReqConnClientsListMes(previousServerAddr);
+                    previousServer->lastClientListFetch = QDateTime::currentDateTime();
+                }
+            }
+        }
+    }
+}
+
+void CClientAggregator::cleanupClientLocationCache()
+{
+    QMutexLocker locker(&m_dataMutex);
+    
+    const QDateTime now = QDateTime::currentDateTime();
+    
+    // Only run cleanup every AGGREGATOR_CLIENT_LOCATION_CLEANUP_MS milliseconds
+    if (m_lastClientLocationCleanup.isValid() &&
+        m_lastClientLocationCleanup.msecsTo(now) < AGGREGATOR_CLIENT_LOCATION_CLEANUP_MS)
+    {
+        return;
+    }
+    
+    m_lastClientLocationCleanup = now;
+    
+    // Verify all entries actually exist on their tracked servers
+    // Remove stale entries (clients no longer on any server)
+    auto it = m_clientActiveOnServerMap.begin();
+    int removedMissing = 0;
+    while (it != m_clientActiveOnServerMap.end())
+    {
+        const ClientLocation& location = it.value();
+        bool clientFound = false;
+        
+        // Search for this client on the tracked server
+        if (Server* server = getServerFromAnyDirectory(location.serverIp, location.serverPort))
+        {
+            // Parse the client key to get the identifying info
+            QStringList parts = it.key().split(":");
+            if (parts.size() == 3)
+            {
+                QString clientName = parts[0];
+                int countryid = parts[1].toInt();
+                int skillid = parts[2].toInt();
+                
+                // Check if this client exists on the server
+                for (const auto& serverClient : server->clients)
+                {
+                    if (serverClient.name == clientName &&
+                        serverClient.countryid == countryid &&
+                        serverClient.skillid == skillid)
+                    {
+                        clientFound = true;
+                        // Update lastSeen to keep the entry fresh
+                        it.value().lastSeen = now;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        if (!clientFound)
+        {
+            // Client no longer on tracked server - check if expired
+            if (it.value().lastSeen.msecsTo(now) > AGGREGATOR_CLIENT_LOCATION_TTL_MS)
+            {
+                qDebug() << "ClientAggregator: Removing expired stale client location entry:" << it.key()
+                         << "from" << location.serverIp << ":" << location.serverPort;
+                it = m_clientActiveOnServerMap.erase(it);
+                removedMissing++;
+            }
+            else
+            {
+                // Not yet expired, keep in case client returns soon
+                qDebug() << "ClientAggregator: Client" << it.key() << "removed from server but kept in cache"
+                         << "for" << (AGGREGATOR_CLIENT_LOCATION_TTL_MS - it.value().lastSeen.msecsTo(now)) / 1000 << "more seconds";
+                ++it;
+            }
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    
+    if (removedMissing > 0)
+    {
+        qDebug() << "ClientAggregator: Client location cache cleanup - Removed" << removedMissing
+                 << "expired stale entries. Cache size:" << m_clientActiveOnServerMap.size();
+    }
 }

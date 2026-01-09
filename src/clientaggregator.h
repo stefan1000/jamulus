@@ -51,6 +51,8 @@ class CConnectionlessSocket;
 #define AGGREGATOR_SERVER_TIMEOUT_MS            30000 // Time after which a non-responding server is considered offline
 #define AGGREGATOR_DIRECTORY_TIMEOUT_MS         60000 // Time after which a non-responding directory is considered offline
 #define AGGREGATOR_SERVER_SOFT_REMOVAL_PINGS    4     // Number of failed pings before soft-removed servers are deleted
+#define AGGREGATOR_CLIENT_LOCATION_CLEANUP_MS   60000 // Cleanup client location cache every 60 seconds
+#define AGGREGATOR_CLIENT_LOCATION_TTL_MS       3600000  // Keep stale (removed from server) client entries for 1 hour
 
 /* Data Structures ************************************************************/
 struct Client
@@ -77,6 +79,14 @@ enum class EIPStackType
     IPV4_ONLY    = 1,  // Server is IPv4 only
     IPV6_ONLY    = 2,  // Server is IPv6 only
     DUAL_STACK   = 3   // Server supports both IPv4 and IPv6
+};
+
+// Client location tracking (where a client was last seen)
+struct ClientLocation
+{
+    QString serverIp;
+    quint16 serverPort{};
+    QDateTime lastSeen;
 };
 
 struct Server
@@ -210,6 +220,17 @@ private:
     void queryServers();
     void cleanupExpiredServers();
 
+    // Helper functions for IP stack detection
+    EIPStackType detectIPStackType(const QHostAddress& addr);
+    void updateServerIPStackType(Server& server, const QHostAddress& addr);
+    
+    // Client location tracking helpers
+    QString generateClientKey(const Client& client) const;
+    void checkAndRequestRefetchForMovedClients(const QString& serverIp, quint16 serverPort, const QList<Client>& newClients);
+    void cleanupClientLocationCache();
+    
+    static QString normalizedIpString(const QHostAddress& qhAddr);
+
     QMap<QString, Directory> m_directories;
     CProtocol                m_protocol;
     CConnectionlessSocket*   m_pSocket;
@@ -223,9 +244,7 @@ private:
     mutable QRecursiveMutex m_cacheMutex;
     mutable QMap<QString, JsonCacheData> m_jsonCaches;             // Cache per parameter set
     
-    // Helper functions for IP stack detection
-    EIPStackType detectIPStackType(const QHostAddress& addr);
-    void updateServerIPStackType(Server& server, const QHostAddress& addr);
-    
-    static QString normalizedIpString(const QHostAddress& qhAddr);
+    // Client active server tracking: key = "name:countryid:skillid", value = server location (IP:port)
+    QMap<QString, ClientLocation> m_clientActiveOnServerMap;
+    QDateTime m_lastClientLocationCleanup;  // Timestamp of last cleanup
 };
