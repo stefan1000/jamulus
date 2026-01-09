@@ -76,11 +76,7 @@ jobs:
     steps:
       - name:                       Checkout code
         uses:                       actions/checkout@v4
-      - name: Add Qt6 PPA (for 22.04 Compatibility)
-        run: |
-            sudo add-apt-repository ppa:okirby/qt6-backports -y
-            sudo apt update
-      - name:                       Determine release version, type and prerelease variables
+       - name:                       Determine release version, type and prerelease variables
         run:                        ./.github/autobuild/get_build_vars.py
         id:                         get-build-vars
 
