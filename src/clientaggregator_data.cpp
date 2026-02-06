@@ -60,7 +60,6 @@ QJsonObject Server::toJson ( bool detailed ) const
     obj["city"]        = city;
     obj["ip"]          = ip;
     obj["nclients"]    = nclients;
-    obj["lastClientListReceived"] = lastClientListReceived.isValid() ? lastClientListReceived.toString ( Qt::ISODate ) : QString();
 
     // Add geolocation if available
     if ( geo_valid )

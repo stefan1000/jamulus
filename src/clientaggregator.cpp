@@ -365,13 +365,14 @@ void CClientAggregator::onServerListReceived ( const CHostAddress& inetAddr, con
         {
             // Try to get cached geolocation data first
             GeoLocationData cachedGeo = m_geoLocation->getGeoLocation(server.ip);
-            if (cachedGeo.is_valid)
+            if ( cachedGeo.is_valid )
             {
                 // Apply cached geolocation data
-                server.geo_latitude = cachedGeo.latitude;
+                server.geo_latitude  = cachedGeo.latitude;
                 server.geo_longitude = cachedGeo.longitude;
-                server.geo_valid = true;
-                server.lastModified = now2;
+                server.geo_valid     = true;
+                server.lastModified  = now2;
+                hasChanges           = true; // Mark directory as changed
                 //qDebug() << "ClientAggregator: Applied cached geolocation for" << server.ip
                 //         << "lat:" << cachedGeo.latitude << "lon:" << cachedGeo.longitude;
             }
@@ -398,39 +399,46 @@ void CClientAggregator::onPingTimeReceived ( const CHostAddress& inetAddr, int i
 {
     QMutexLocker locker ( &m_dataMutex );
     // qDebug() << "ClientAggregator: Received ping from" << inetAddr.toString() << "- Ping:" << iPingTime << "Clients:" << iNumClients;
+
     // Find which directory this server belongs to
-   
-    if ( Server* server = getServerFromAnyDirectory(normalizedIpString ( inetAddr.InetAddr ), inetAddr.iPort ) )
+    const ServerAndDirectory sad = getServerAndDirectory ( normalizedIpString ( inetAddr.InetAddr ), inetAddr.iPort );
+    if ( sad )
     {
+        Server*    server    = sad.server;
+        Directory* directory = sad.directory;
         const QDateTime now = QDateTime::currentDateTime();
-        server->ping        = iPingTime;
-        server->nclients    = iNumClients; // Update nclients directly from ping response
-        
-        // Update IP stack type based on ping response address
-        updateServerIPStackType(*server, inetAddr.InetAddr);
-        
-        // Reset missed ping counter on successful ping
+
+        // Store old values to check for meaningful changes that affect the JSON output
+        const int          oldNumClients       = server->nclients;
+        const EIPStackType oldIpStackType      = server->ipStackType;
+        const bool         oldReachableViaIPv4 = server->reachableViaIPv4;
+        const bool         oldReachableViaIPv6 = server->reachableViaIPv6;
+
+        // Update server properties from ping
+        server->ping     = iPingTime; // This change should not trigger an E-Tag update
+        server->nclients = iNumClients;
+        updateServerIPStackType ( *server, inetAddr.InetAddr );
         server->missedPingCount = 0;
 
         bool shouldRequestClientList = false;
 
         if ( iNumClients > 0 )
         {
-            // Condition 1: Number of clients changed
             if ( iNumClients != server->lastNumClients )
             {
+                // Condition 1: Number of clients changed, so we need an immediate update.
                 shouldRequestClientList = true;
             }
-            // Condition 2: Last fetch was too long ago
-            if ( !shouldRequestClientList && server->lastClientListFetch.isValid() &&
-                 server->lastClientListFetch.msecsTo ( now ) > AGGREGATOR_UPDATE_CLIENTS_INTERVAL_MS )
+            else
             {
-                shouldRequestClientList = true;
-            }
-            // Condition 3: No valid last fetch time, but clients reported
-            if ( !shouldRequestClientList && !server->lastClientListFetch.isValid() )
-            {
-                shouldRequestClientList = true;
+                // Condition 2: Number of clients is constant.
+                // We periodically query every AGGREGATOR_UPDATE_CLIENTS_INTERVAL_MS
+                // to get updated client details (name, instrument, etc.),
+                // or if we have never fetched the list before.
+                if ( !server->lastClientListFetch.isValid() || server->lastClientListFetch.msecsTo ( now ) > AGGREGATOR_UPDATE_CLIENTS_INTERVAL_MS )
+                {
+                    shouldRequestClientList = true;
+                }
             }
 
             if ( shouldRequestClientList )
@@ -453,19 +461,27 @@ void CClientAggregator::onPingTimeReceived ( const CHostAddress& inetAddr, int i
             server->lastClientListFetch = QDateTime(); // Reset last fetch time
         }
 
-        server->lastNumClients   = iNumClients; // Update last reported client count
+        // Update timestamps
+        server->lastNumClients   = iNumClients;
         server->lastPingResponse = now;
-        server->lastModified     = now;
-        // directory.lastModified = now; // Update removed from here as server is now retrieved from helper function.
+        server->lastModified     = now; // Server's own timestamp always updated
 
+        // Only update the directory's timestamp if data visible in the JSON has changed
+        const bool numClientsChanged = ( oldNumClients != server->nclients );
+        const bool ipStackChanged =
+            ( oldIpStackType != server->ipStackType || oldReachableViaIPv4 != server->reachableViaIPv4 || oldReachableViaIPv6 != server->reachableViaIPv6 );
+
+        if ( numClientsChanged || ipStackChanged )
+        {
+            directory->lastModified = now;
+        }
     }
     else
     {
         // Server not found - this is now less of an issue since we soft-remove servers
         // But still log it as it helps track directory consistency
-        QString serverKey = normalizedIpString(inetAddr.InetAddr) + ":" + QString::number(inetAddr.iPort);
-        qDebug() << "ClientAggregator: Ping received from unknown server" << serverKey
-                 << "(may be pending soft removal after missed pings)";
+        QString serverKey = normalizedIpString ( inetAddr.InetAddr ) + ":" + QString::number ( inetAddr.iPort );
+        qDebug() << "ClientAggregator: Ping received from unknown server" << serverKey << "(may be pending soft removal after missed pings)";
     }
 }
 
@@ -473,13 +489,16 @@ void CClientAggregator::onVersionReceived ( const CHostAddress& inetAddr, COSUti
 {
     QMutexLocker locker ( &m_dataMutex );
     // qDebug() << "ClientAggregator: Received version from" << inetAddr.toString() << "- Version:" << version;
-    if ( Server* server = getServerFromAnyDirectory( normalizedIpString(inetAddr.InetAddr), inetAddr.iPort ) )
+    const ServerAndDirectory sad = getServerAndDirectory ( normalizedIpString ( inetAddr.InetAddr ), inetAddr.iPort );
+    if ( sad )
     {
+        Server*    server    = sad.server;
+        Directory* directory = sad.directory;
         const QDateTime now = QDateTime::currentDateTime();
         server->version     = version;
         server->os          = COSUtil::GetOperatingSystemString ( eOSType );
-        server->lastModified   = now;
-        // directory.lastModified = now; // Update removed from here as server is now retrieved from helper function.
+        server->lastModified    = now;
+        directory->lastModified = now;
     }
 }
 
@@ -488,10 +507,13 @@ void CClientAggregator::onConnClientsListMesReceived ( const CHostAddress& inetA
     QMutexLocker locker ( &m_dataMutex );
     // qDebug() << "ClientAggregator: Received client list from" << inetAddr.toString() << "with" << vecChanInfo.Size() << "clients.";
 
-    if ( Server* server = getServerFromAnyDirectory( normalizedIpString(inetAddr.InetAddr), inetAddr.iPort ) )
+    const ServerAndDirectory sad = getServerAndDirectory ( normalizedIpString ( inetAddr.InetAddr ), inetAddr.iPort );
+    if ( sad )
     {
+        Server*    server    = sad.server;
+        Directory* directory = sad.directory;
         const QDateTime now = QDateTime::currentDateTime();
-        
+
         // Build list of new clients before clearing
         QList<Client> newClients;
         for ( const auto& chanInfo : vecChanInfo )
@@ -499,7 +521,7 @@ void CClientAggregator::onConnClientsListMesReceived ( const CHostAddress& inetA
             Client newClient;
             newClient.chanid       = chanInfo.iChanID;
             newClient.country      = QLocale::countryToString ( chanInfo.eCountry );
-            newClient.country_code = countryToCode(chanInfo.eCountry);
+            newClient.country_code = countryToCode ( chanInfo.eCountry );
             newClient.instrument   = CInstPictures::GetName ( chanInfo.iInstrument );
             newClient.skill        = skillLevelToString ( chanInfo.eSkillLevel );
             newClient.skillid      = static_cast<int> ( chanInfo.eSkillLevel );
@@ -512,24 +534,22 @@ void CClientAggregator::onConnClientsListMesReceived ( const CHostAddress& inetA
         }
 
         // Check for clients that moved from other servers and trigger refetch
-        QString serverIp = normalizedIpString(inetAddr.InetAddr);
+        QString serverIp   = normalizedIpString ( inetAddr.InetAddr );
         quint16 serverPort = inetAddr.iPort;
-        checkAndRequestRefetchForMovedClients(serverIp, serverPort, newClients);
+        checkAndRequestRefetchForMovedClients ( serverIp, serverPort, newClients );
 
         server->clients.clear();
-        for (const auto& client : newClients)
+        for ( const auto& client : newClients )
         {
-            server->clients.append(client);
+            server->clients.append ( client );
         }
 
         // Sort clients by chanid
-        std::sort(server->clients.begin(), server->clients.end(), [](const Client& a, const Client& b) {
-            return a.chanid < b.chanid;
-        });
+        std::sort ( server->clients.begin(), server->clients.end(), [] ( const Client& a, const Client& b ) { return a.chanid < b.chanid; } );
 
         server->lastClientListReceived = now; // Update the timestamp when client list was received
-        server->lastModified   = now;
-        // directory.lastModified = now; // Update removed from here as server is now retrieved from helper function.
+        server->lastModified           = now;
+        directory->lastModified        = now;
     }
     else
     {
@@ -635,17 +655,17 @@ Server* CClientAggregator::getServer ( const QString& directoryAddress, const QS
     return nullptr;
 }
 
-Server* CClientAggregator::getServerFromAnyDirectory(const QString& serverIp, quint16 port)
+ServerAndDirectory CClientAggregator::getServerAndDirectory ( const QString& serverIp, quint16 port )
 {
     for ( auto& directory : m_directories )
     {
-        if ( Server* server = getServer ( directory.address, serverIp, port ) )
+        auto it = std::find_if ( directory.servers.begin(), directory.servers.end(), [&] ( const Server& s ) { return s.ip == serverIp && s.port == port; } );
+        if ( it != directory.servers.end() )
         {
-            return server;
+            return ServerAndDirectory{ & ( *it ), &directory };
         }
     }
-    qWarning() << "ClientAggregator: Server not found in any directory for IP:" << serverIp << "Port:" << port;
-    return nullptr;
+    return ServerAndDirectory{ nullptr, nullptr };
 }
 
 void CClientAggregator::updateOrAddClient ( const QString& directoryAddress, const QString& serverIp, quint16 port, const Client& client )
@@ -1001,21 +1021,22 @@ void CClientAggregator::checkAndRequestRefetchForMovedClients(const QString& ser
         int colonPos = serverId.lastIndexOf(":");
         if (colonPos > 0)
         {
-            QString previousServerIp = serverId.left(colonPos);
-            quint16 previousServerPort = serverId.mid(colonPos + 1).toUShort();
+            QString previousServerIp   = serverId.left ( colonPos );
+                        quint16 previousServerPort = serverId.mid ( colonPos + 1 ).toUShort();
             
-            if (Server* previousServer = getServerFromAnyDirectory(previousServerIp, previousServerPort))
-            {
-                // Request a refetch by requesting the connected clients list
-                CHostAddress previousServerAddr;
-                if (NetworkUtil().ParseNetworkAddress(serverId, previousServerAddr, true))
-                {
-                    qDebug() << "ClientAggregator: Requesting client list refetch for server"
-                             << serverId << "to verify client removal";
-                    m_protocol.CreateCLReqConnClientsListMes(previousServerAddr);
-                    previousServer->lastClientListFetch = QDateTime::currentDateTime();
-                }
-            }
+                        const ServerAndDirectory sad = getServerAndDirectory ( previousServerIp, previousServerPort );
+                        if ( sad )
+                        {
+                            Server* previousServer = sad.server;
+                            // Request a refetch by requesting the connected clients list
+                            CHostAddress previousServerAddr;
+                            if ( NetworkUtil().ParseNetworkAddress ( serverId, previousServerAddr, true ) )
+                            {
+                                qDebug() << "ClientAggregator: Requesting client list refetch for server" << serverId << "to verify client removal";
+                                m_protocol.CreateCLReqConnClientsListMes ( previousServerAddr );
+                                previousServer->lastClientListFetch = QDateTime::currentDateTime();
+                            }
+                        }
         }
     }
 }
@@ -1045,11 +1066,13 @@ void CClientAggregator::cleanupClientLocationCache()
         bool clientFound = false;
         
         // Search for this client on the tracked server
-        if (Server* server = getServerFromAnyDirectory(location.serverIp, location.serverPort))
+        const ServerAndDirectory sad = getServerAndDirectory ( location.serverIp, location.serverPort );
+        if ( sad )
         {
+            Server* server = sad.server;
             // Parse the client key to get the identifying info
-            QStringList parts = it.key().split(":");
-            if (parts.size() == 3)
+            QStringList parts = it.key().split ( ":" );
+            if ( parts.size() == 3 )
             {
                 QString clientName = parts[0];
                 int countryid = parts[1].toInt();

@@ -45,16 +45,24 @@
 
 class CConnectionlessSocket;
 
-/* Definitions ****************************************************************/
-#define AGGREGATOR_UPDATE_INTERVAL_MS           15000  // Interval to re-query directories and servers
-#define AGGREGATOR_UPDATE_CLIENTS_INTERVAL_MS   30000 // Interval to force re-fetching client list
-#define AGGREGATOR_SERVER_TIMEOUT_MS            30000 // Time after which a non-responding server is considered offline
-#define AGGREGATOR_DIRECTORY_TIMEOUT_MS         60000 // Time after which a non-responding directory is considered offline
-#define AGGREGATOR_SERVER_SOFT_REMOVAL_PINGS    4     // Number of failed pings before soft-removed servers are deleted
-#define AGGREGATOR_CLIENT_LOCATION_CLEANUP_MS   60000 // Cleanup client location cache every 60 seconds
-#define AGGREGATOR_CLIENT_LOCATION_TTL_MS       3600000  // Keep stale (removed from server) client entries for 1 hour
+#define AGGREGATOR_UPDATE_INTERVAL_MS         20000   // Interval to re-query directories and servers
+#define AGGREGATOR_UPDATE_CLIENTS_INTERVAL_MS 60000   // Interval to force re-fetching client list
+#define AGGREGATOR_SERVER_TIMEOUT_MS          30000   // Time after which a non-responding server is considered offline
+#define AGGREGATOR_SERVER_SOFT_REMOVAL_PINGS  4       // Number of failed pings before soft-removed servers are deleted
+#define AGGREGATOR_CLIENT_LOCATION_CLEANUP_MS 60000   // Cleanup client location cache every 60 seconds
+#define AGGREGATOR_CLIENT_LOCATION_TTL_MS     3600000 // Keep stale (removed from server) client entries for 1 hour
+
+struct Server;
+struct Directory;
 
 /* Data Structures ************************************************************/
+struct ServerAndDirectory
+{
+    Server*    server    = nullptr;
+    Directory* directory = nullptr;
+    explicit operator bool() const { return server != nullptr; }
+};
+
 struct Client
 {
     int       chanid{};
@@ -188,8 +196,8 @@ public:
     void    updateOrAddServer ( const QString& directoryAddress, const Server& server );
     void    updateOrAddServerLocked ( const QString& directoryAddress, const Server& server ); // Internal: called with mutex locked
     bool    removeServer ( const QString& directoryAddress, const QString& serverIp, quint16 port );
-    Server* getServer ( const QString& directoryAddress, const QString& serverIp, quint16 port );
-    Server* getServerFromAnyDirectory(const QString& serverIp, quint16 port);
+    Server*            getServer ( const QString& directoryAddress, const QString& serverIp, quint16 port );
+    ServerAndDirectory getServerAndDirectory ( const QString& serverIp, quint16 port );
 
     // CRUD for Clients
     void    updateOrAddClient ( const QString& directoryAddress, const QString& serverIp, quint16 port, const Client& client );
