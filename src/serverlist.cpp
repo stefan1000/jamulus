@@ -625,9 +625,15 @@ void CServerListManager::Append ( const CHostAddress&    InetAddr,
             ServerList[iSelIdx].UpdateRegistration();
         }
 
-        pConnLessProtocol->CreateCLRegisterServerResp ( InetAddr,
-                                                        iSelIdx == INVALID_INDEX ? ESvrRegResult::SRR_SERVER_LIST_FULL
-                                                                                 : ESvrRegResult::SRR_REGISTERED );
+        const ESvrRegResult res = iSelIdx == INVALID_INDEX ? ESvrRegResult::SRR_SERVER_LIST_FULL : ESvrRegResult::SRR_REGISTERED;
+
+        pConnLessProtocol->CreateCLRegisterServerResp ( InetAddr, res );
+
+        // if external server also has an explicit public IP address set, send response to the external IP address, too
+        if(serverIsExternal && LInetAddr.InetAddr != CHostAddress().InetAddr )
+        {
+            pConnLessProtocol->CreateCLRegisterServerResp ( LInetAddr, res );
+        }
     }
 }
 
@@ -697,16 +703,29 @@ void CServerListManager::RetrieveAll ( const CHostAddress& InetAddr )
             // copy list item
             CServerInfo& siCurListEntry = vecServerInfo[iIdx] = ServerList[iIdx];
 
-            bool serverIsInternal = NetworkUtil::IsPrivateNetworkIP ( siCurListEntry.HostAddr.InetAddr );
+            const bool serverIsInternal = NetworkUtil::IsPrivateNetworkIP ( siCurListEntry.HostAddr.InetAddr );
 
-            bool wantHostAddr = clientIsInternal /* HostAddr is local IP if local server else external IP, so do not replace */ ||
-                                ( !serverIsInternal &&
-                                  InetAddr.InetAddr != siCurListEntry.HostAddr.InetAddr /* external server and client have different public IPs */ );
+            const bool lHostAddrIsPublic = siCurListEntry.LHostAddr.InetAddr != CHostAddress().InetAddr &&
+                                     !NetworkUtil::IsPrivateNetworkIP ( siCurListEntry.LHostAddr.InetAddr );
 
-            if ( !wantHostAddr )
+            // if LHostAddr is set and public, prefer it over the UDP-observed HostAddr (unless the client is also internal)
+            if ( lHostAddrIsPublic && !clientIsInternal )
             {
                 vecServerInfo[iIdx].HostAddr = siCurListEntry.LHostAddr;
             }
+            else
+            {
+                const bool wantHostAddr =
+                    clientIsInternal /* HostAddr is local IP if local server else external IP, so do not replace */ ||
+                    ( !serverIsInternal &&
+                      InetAddr.InetAddr != siCurListEntry.HostAddr.InetAddr /* external server and client have different public IPs */ );
+
+                if ( !wantHostAddr )
+                {
+                    vecServerInfo[iIdx].HostAddr = siCurListEntry.LHostAddr;
+                }
+            }
+
 
             // do not send a "ping" to a server local to the directory (no need)
             if ( !serverIsInternal )
